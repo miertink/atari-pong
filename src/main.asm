@@ -74,7 +74,7 @@ PADDLE_Y_MIN   = WALL_HT+SCORE_HT  ; lowest valid P0Y/P1Y — paddles can't
                                  ; Independent of paddle height (only the
                                  ; TOP edge matters here), so this one stays
                                  ; a fixed constant, unlike PaddleYMax below.
-COURT_BOTTOM   = 192-WALL_HT    ; first line of the bottom wall band
+COURT_BOTTOM   = 191-WALL_HT    ; first line of the bottom wall band
 BALL_HT        = 4              ; ball height, in scanlines
 BALL_SIZE      = %00100000      ; CTRLPF: ball width = 4 color clocks
 COLOR_WHITE    = $0E
@@ -215,6 +215,16 @@ HitLevel ds 1                   ; 0..MAX_HIT_LEVEL — indexes LevelSpeedTable
 HitsSinceLevelUp ds 1           ; 0..HITS_PER_LEVEL-1, counts toward the
                                  ; next level. Both reset to 0 in ResetBall
                                  ; (every point, not just a match win).
+InRally ds 1                    ; 0 = still serving (before the first hit),
+                                 ; 1 = rallying. Reset to 0 in ResetBall, set
+                                 ; to 1 on the first paddle hit. Gates the
+                                 ; rally speed boost below (serve is never
+                                 ; boosted).
+RallyBoostCounter ds 1           ; 0..2, cycles every 3 frames during the
+                                 ; first 10 hits of a rally (see BoostThisFrame)
+BoostThisFrame ds 1              ; computed fresh each frame: 1 = the ball
+                                 ; takes an extra step this frame (both
+                                 ; axes), 0 = normal step
 PaddleHt ds 1                   ; CURRENT paddle height (RAM) — looked up
                                  ; from PaddleHtTable[PaddleDifficultyStage],
                                  ; cycled by the GAME RESET switch
@@ -319,6 +329,30 @@ MainLoop
 
         jsr AdvancePaddleDifficulty  ; before the paddles move, so a size
                                  ; change (if any) takes effect this frame
+
+        ; --- rally speed boost: during the FIRST 10 hits of a rally only
+        ; (InRally set, HitLevel still 0), the ball takes an extra step
+        ; (in whatever direction it's already going) every 3rd frame,
+        ; averaging ~1.33x the base speed — a gentler ramp-up right after
+        ; serve than jumping straight to LevelSpeedTable's old flat value.
+        ; From HitLevel 1 onward, no boost — back to the plain integer
+        ; progression (2,2,3) already tuned before. Computed once here,
+        ; used by both DoMoveY and DoMoveX below.
+        lda #0
+        sta BoostThisFrame
+        lda InRally
+        beq NoBoostCheck         ; still serving, never boost
+        lda HitLevel
+        bne NoBoostCheck         ; past the first 10 hits, no boost either
+        inc RallyBoostCounter
+        lda RallyBoostCounter
+        cmp #3
+        bne NoBoostCheck
+        lda #0
+        sta RallyBoostCounter
+        lda #1
+        sta BoostThisFrame
+NoBoostCheck
 
         ; --- move paddle P0 (joystick 0 = left port: bit4=Up, bit5=Down) ---
         ; P0Dir records this frame's direction (-1/0/+1), used for ball
@@ -429,6 +463,11 @@ DoMoveY
         lda BallY
         clc
         adc BallDY
+        ldx BoostThisFrame
+        beq NoBoostY
+        clc
+        adc BallDY               ; extra step, same direction as BallDY
+NoBoostY
         sta BallY
 SkipMoveY
         lda BallY
@@ -483,6 +522,11 @@ DoMoveX
         lda BallX
         clc
         adc BallDX
+        ldx BoostThisFrame
+        beq NoBoostX
+        clc
+        adc BallDX               ; extra step, same direction as BallDX
+NoBoostX
         sta BallX
 BallMoveDone
         ; explicit reload: on the score paths, A came out of
@@ -741,6 +785,8 @@ SkipBBall
         sta BallDX
         lda #BALL_SKIP_NONE      ; serve angle (skip mode) ends here; only
         sta BallSkipMode         ; the spin effect below applies in a rally
+        lda #1
+        sta InRally              ; starts the rally speed boost (see VBLANK)
         jsr SetBallDYToRallySpeed
         lda P0Dir
         beq NoSpinP0
@@ -762,6 +808,8 @@ NoHitP0
         sta BallDX
         lda #BALL_SKIP_NONE
         sta BallSkipMode
+        lda #1
+        sta InRally
         jsr SetBallDYToRallySpeed
         lda P1Dir
         beq NoSpinP1
@@ -794,18 +842,22 @@ OverscanLoop
         jmp MainLoop
 
 ; ---------------------------------------------------------------------------
-; LevelSpeedTable - rally speed at each HitLevel (0..MAX_HIT_LEVEL), hand-
-; computed by compounding BALL_RALLY_SPEED(2) by 10% per level and rounding
-; to the nearest integer at each step (rounding the RUNNING value, not a
-; freshly-rounded one each time, so the fractional part isn't lost):
-;   L0: 2.000            -> 2
+; LevelSpeedTable - BASE rally speed at each HitLevel (0..MAX_HIT_LEVEL).
+;
+; L0 is 1, not the old flat 2: right after the first hit, BoostThisFrame
+; (see VBLANK) adds an extra step every 3rd frame instead, averaging
+; ~1.33x — gentler than jumping straight to 2x. L1-L3 keep the original,
+; already-tuned flat-integer progression (no boost applies once HitLevel
+; leaves 0), hand-computed by compounding 2.0 by 10% per level and
+; rounding to the nearest integer at each step (rounding the RUNNING
+; value, not a freshly-rounded one each time, so the fraction isn't lost):
 ;   L1: 2.000*1.1=2.200  -> 2
 ;   L2: 2.200*1.1=2.420  -> 2
 ;   L3: 2.420*1.1=2.662  -> 3  (= PADDLE_SPEED; capped here, see constants
 ;                               note near HITS_PER_LEVEL for why)
 ; ---------------------------------------------------------------------------
 LevelSpeedTable
-        .byte 2,2,2,3
+        .byte 1,2,2,3
 
 ; ---------------------------------------------------------------------------
 ; PaddleHtTable - paddle height at each PaddleDifficultyStage (0..
@@ -1072,6 +1124,8 @@ ResetBall
         lda #0
         sta HitLevel
         sta HitsSinceLevelUp
+        sta InRally
+        sta RallyBoostCounter
 
         lda #BALL_X_INIT
         sta BallX
