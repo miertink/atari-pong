@@ -55,13 +55,27 @@ BALL_SIZE      = %00010000      ; CTRLPF: bola com 2 color clocks de largura
 COLOR_WHITE    = $0E
 
 ; limites de quique da bola (0-159 horizontal, mesma escala usada por
-; SetHorizPos; verticais em linhas de scanline, 0-191)
-BALL_X_MIN     = 1
+; SetHorizPos; verticais em linhas de scanline, 0-191). A deteccao de
+; quique compara IGUALDADE EXATA com esses limites (nao "<=") — por isso
+; eles precisam ter a mesma paridade de BALL_X_INIT/BALL_Y_INIT e serem
+; alcancaveis em passos de BALL_SPEED, senao a bola pula por cima do
+; limite sem nunca bater exatamente nele. Com BALL_X_INIT=80 (par) e
+; BALL_SPEED=2 (par), a posicao da bola e sempre par — por isso os limites
+; abaixo tambem sao pares. Se mudar BALL_SPEED/BALL_X_INIT/BALL_Y_INIT,
+; conferir essa paridade de novo (ou trocar por comparacao "<=").
+BALL_X_MIN     = 2
 BALL_X_MAX     = 158
 BALL_Y_MIN     = 0
 BALL_Y_MAX     = 192-BALL_HT
-BALL_DX_INIT   = 1
-BALL_DY_INIT   = 1
+BALL_SPEED     = 2              ; pixels/frame em cada eixo. Teste: 1px/frame
+                                 ; parecia "aos saltos" em monitor/emulador
+                                 ; (sem persistencia de fosforo de um CRT).
+                                 ; Usado tanto na velocidade inicial quanto
+                                 ; nos quiques (ver blocos abaixo) — nao
+                                 ; mexer so na constante inicial, tem que
+                                 ; trocar os dois em conjunto.
+BALL_DX_INIT   = BALL_SPEED
+BALL_DY_INIT   = BALL_SPEED
 
 P0_X           = 4              ; posicao horizontal fixa da raquete esquerda
                                  ; (ajustado: 3x a largura da raquete a menos
@@ -82,8 +96,8 @@ P1YEnd  ds 1                    ; P1Y + PADDLE_HT (pre-calculado)
 BallX   ds 1                    ; coluna da bola (escala 0-159, mesma do SetHorizPos)
 BallY   ds 1                    ; topo da bola
 BallYEnd ds 1                   ; BallY + BALL_HT (pre-calculado)
-BallDX  ds 1                    ; velocidade horizontal: $01 ou $FF (-1)
-BallDY  ds 1                    ; velocidade vertical: $01 ou $FF (-1)
+BallDX  ds 1                    ; velocidade horizontal: +-BALL_SPEED
+BallDY  ds 1                    ; velocidade vertical: +-BALL_SPEED
 
         SEG code
         ORG $F000
@@ -221,7 +235,7 @@ SkipP1Down
         bne NoTopBounce
         lda BallDY
         bpl NoTopBounce          ; ja indo pra baixo (>=0), nada a fazer
-        lda #1
+        lda #BALL_SPEED
         sta BallDY
 NoTopBounce
         lda BallY
@@ -229,7 +243,7 @@ NoTopBounce
         bne NoBottomBounce
         lda BallDY
         bmi NoBottomBounce       ; ja indo pra cima (<0), nada a fazer
-        lda #$FF
+        lda #-BALL_SPEED
         sta BallDY
 NoBottomBounce
         lda BallY
@@ -246,7 +260,7 @@ NoBottomBounce
         bne NoLeftBounce
         lda BallDX
         bpl NoLeftBounce         ; ja indo pra direita (>=0), nada a fazer
-        lda #1
+        lda #BALL_SPEED
         sta BallDX
 NoLeftBounce
         lda BallX
@@ -254,7 +268,7 @@ NoLeftBounce
         bne NoRightBounce
         lda BallDX
         bmi NoRightBounce        ; ja indo pra esquerda (<0), nada a fazer
-        lda #$FF
+        lda #-BALL_SPEED
         sta BallDX
 NoRightBounce
         lda BallX
