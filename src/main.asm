@@ -17,6 +17,13 @@
 ;    GRP0/GRP1/ENABL nunca eram zerados fora do kernel visivel, entao o
 ;    ultimo valor da linha 191 sobrevivia por todo o VSYNC/VBLANK do frame
 ;    seguinte. Agora sao zerados explicitamente ao fim da area visivel.
+; 3) "bola some quando as duas raquetes vao para a metade superior da tela":
+;    revisado o codigo, BallY e P0Y/P1Y sao variaveis de RAM independentes
+;    ($85 vs $81/$83), sem ponto de contato — nao ha caminho logico que
+;    ligue a posicao das raquetes ao desenho da bola. Suspeita mais provavel:
+;    a bola tinha so 1 scanline de altura, objeto fino demais para renderizar
+;    de forma confiavel (problema pratico conhecido em kernels Atari 2600,
+;    independente de bug de posicao). Aumentada para 2 scanlines.
 ;
 ; Paredes topo/base ficam de fora desta passada de proposito: o kernel de
 ; 192 linhas tem orcamento de 76 ciclos de CPU por scanline. Com raquetes +
@@ -40,6 +47,7 @@ PADDLE_HT      = 16             ; altura da raquete, em scanlines
 PADDLE_PATTERN = %00111100      ; padrao de bits da raquete (GRP0/GRP1)
 PADDLE_SPEED   = 2              ; scanlines por frame, ao segurar o joystick
 PADDLE_Y_MAX   = 192-PADDLE_HT  ; maior valor valido de P0Y/P1Y (base = linha 191)
+BALL_HT        = 2              ; altura da bola, em scanlines
 BALL_SIZE      = %00010000      ; CTRLPF: bola com 2 color clocks de largura
 COLOR_WHITE    = $0E
 
@@ -59,7 +67,8 @@ P0Y     ds 1                    ; topo da raquete esquerda
 P0YEnd  ds 1                    ; P0Y + PADDLE_HT (pre-calculado)
 P1Y     ds 1                    ; topo da raquete direita
 P1YEnd  ds 1                    ; P1Y + PADDLE_HT (pre-calculado)
-BallY   ds 1                    ; linha da bola
+BallY   ds 1                    ; topo da bola
+BallYEnd ds 1                   ; BallY + BALL_HT (pre-calculado)
 
         SEG code
         ORG $F000
@@ -90,6 +99,9 @@ Reset
 
         lda #BALL_Y_INIT
         sta BallY
+        clc
+        adc #BALL_HT
+        sta BallYEnd
 
         ; Posicionamento horizontal: feito uma unica vez aqui. Neste
         ; incremento nada muda de posicao horizontal (raquetes so se movem
@@ -216,10 +228,12 @@ SkipP0
 SkipP1
         sta GRP1
 
-        ; bola: 1 scanline de altura por enquanto
+        ; bola: acesa se BallY <= X < BallYEnd (BALL_HT scanlines)
         lda #0
         cpx BallY
-        bne SkipBall
+        bcc SkipBall
+        cpx BallYEnd
+        bcs SkipBall
         lda #%00000010           ; ENABL bit 1
 SkipBall
         sta ENABL
