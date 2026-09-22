@@ -32,14 +32,23 @@
 ; 2026-09-22, reportado como "movimento da bola sofrivel/picotado"):
 ; SetHorizPos usa um loop de "subtrai 15 ate estourar" cujo numero de
 ; iteracoes varia com o valor de X. Para X pequeno (~4) custa ~30 ciclos; para
-; X grande (~150-159, exatamente a faixa perto da raquete direita) passa de
-; 80 ciclos — acima do orcamento de 76/scanline. Como a bola varre essa
-; faixa toda vez que se aproxima da lateral direita, esses frames especificos
-; ganhavam 1 scanline a mais (263 linhas em vez de 262), causando o
-; picotamento. Contar WSYNCs a mao so funciona para custo CONSTANTE por
-; linha; para custo variavel (SetHorizPos com X mudando todo frame), o timer
-; de hardware absorve a variacao automaticamente, sem precisar prever
-; quanto cada bloco vai gastar.
+; X grande (~150-159) passa de 80 ciclos — acima do orcamento de 76/scanline.
+; Contar WSYNCs a mao so funciona para custo CONSTANTE por linha; para custo
+; variavel, o timer de hardware absorve a variacao automaticamente.
+;
+; HMOVE precisa de WSYNC logo antes (requisito de hardware, janela de ~24
+; ciclos, nao so orcamento) — regressao real cometida e corrigida na mesma
+; investigacao (raquetes chegaram a se mover sozinhas por causa disso).
+;
+; Gangueira residual apos os fixes acima ("para e pula", salto maior que o
+; passo normal, a cada ~7-8 frames): diagnosticada empiricamente (fundo da
+; tela piscando com Frame e depois com BallX) como NAO sendo bug — RAM e
+; timing confirmados corretos a cada frame. Causa: a bola tinha so 2 color
+; clocks de largura, e o passo de 2px/frame era comparavel ao proprio
+; tamanho dela — imperceptivel visualmente. So o salto do "grupo grosso" do
+; SetHorizPos (a cada ~15 unidades de X, ~7-8 frames na velocidade 2) era
+; grande o suficiente pra aparecer, dando efeito de "para e pula". Corrigido
+; aumentando a largura visual da bola (BALL_SIZE) para 8 color clocks.
 
         processor 6502
         include "vcs.h"
@@ -51,7 +60,12 @@ PADDLE_PATTERN = %00111100      ; padrao de bits da raquete (GRP0/GRP1)
 PADDLE_SPEED   = 2              ; scanlines por frame, ao segurar o joystick
 PADDLE_Y_MAX   = 192-PADDLE_HT  ; maior valor valido de P0Y/P1Y (base = linha 191)
 BALL_HT        = 2              ; altura da bola, em scanlines
-BALL_SIZE      = %00010000      ; CTRLPF: bola com 2 color clocks de largura
+BALL_SIZE      = %00110000      ; CTRLPF: bola com 8 color clocks de largura
+                                 ; (era 2 — passo de 2px/frame era comparavel
+                                 ; ao proprio tamanho da bola, imperceptivel;
+                                 ; so o salto do grupo "grosso" do
+                                 ; SetHorizPos (~15 unidades) ficava visivel,
+                                 ; dando efeito de "para e pula")
 COLOR_WHITE    = $0E
 
 ; limites de quique da bola (0-159 horizontal, mesma escala usada por
