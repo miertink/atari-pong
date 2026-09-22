@@ -1003,6 +1003,36 @@ NoStageWrap
         lda PaddleHtTable,x
         sta PaddleHt
         jsr RecomputePaddleYMax
+
+        ; Re-anchor each paddle's BOTTOM edge (not top) across the resize:
+        ; new P0Y = old P0YEnd - new PaddleHt, clamped up to PADDLE_Y_MIN if
+        ; that would go negative. Without this, the TOP stayed put and only
+        ; the bottom shrank, leaving a growing gap below a paddle that used
+        ; to be flush with the wall — reported by the user as "the small
+        ; paddle doesn't reach the bottom".
+        ;
+        ; The subtraction is safe from underflow given this game's actual
+        ; constants (min P0YEnd = PADDLE_Y_MIN + smallest PaddleHtTable
+        ; entry, comfortably above the largest PaddleHt we'd subtract) —
+        ; if PADDLE_Y_MIN or PaddleHtTable's entries change later, re-check
+        ; that min(P0YEnd) still exceeds max(PaddleHt).
+        lda P0YEnd
+        sec
+        sbc PaddleHt
+        cmp #PADDLE_Y_MIN
+        bcs P0ReanchorOk
+        lda #PADDLE_Y_MIN
+P0ReanchorOk
+        sta P0Y
+
+        lda P1YEnd
+        sec
+        sbc PaddleHt
+        cmp #PADDLE_Y_MIN
+        bcs P1ReanchorOk
+        lda #PADDLE_Y_MIN
+P1ReanchorOk
+        sta P1Y
 NoResetEdge
         rts
 
