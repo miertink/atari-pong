@@ -70,7 +70,10 @@
 ; ---- Constantes de geometria/cor ----
 PADDLE_HT      = 16             ; altura da raquete, em scanlines
 PADDLE_PATTERN = %00111100      ; padrao de bits da raquete (GRP0/GRP1)
-PADDLE_SPEED   = 2              ; scanlines por frame, ao segurar o joystick
+PADDLE_SPEED   = 3              ; scanlines por frame, ao segurar o joystick
+                                 ; (era 2, igual a BALL_SPEED — usuario pediu
+                                 ; a bola pelo menos 1/3 mais lenta que a
+                                 ; raquete: (3-2)/3 = 33%)
 PADDLE_Y_MAX   = 192-PADDLE_HT  ; maior valor valido de P0Y/P1Y (base = linha 191)
 BALL_HT        = 4              ; altura da bola, em scanlines (era 2)
 BALL_SIZE      = %00100000      ; CTRLPF: bola com 4 color clocks de largura
@@ -105,7 +108,10 @@ BALL_DY_INIT   = BALL_SPEED
 ; colisao bola<->raquete (hardware CXP0FB/CXP1FB, bit 6 = colisao com a bola;
 ; bit 7 seria colisao com playfield, nao usado aqui) + bip curto
 COLLISION_BL   = %01000000
-SOUND_HIT_TONE = 8              ; AUDC0: tom razoavelmente limpo
+SOUND_HIT_TONE = 4              ; AUDC0: "pure tone" (onda quadrada limpa).
+                                 ; Era 8 ("9-bit poly" = ruido branco/chiado
+                                 ; na TIA — nao e tom, e a tabela de valores
+                                 ; que eu assumi errado).
 SOUND_HIT_FREQ = 4              ; AUDF0: agudo (valor baixo = frequencia alta)
 SOUND_HIT_VOL  = 12             ; AUDV0: volume (0-15)
 SOUND_HIT_LEN  = 4              ; duracao do bip, em frames
