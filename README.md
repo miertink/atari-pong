@@ -207,7 +207,8 @@ Consulta rápida para não sair do repositório.
       sem aceleração da bola. Dividido em incrementos:
   - [x] **Incremento 1 — objetos estáticos:** raquetes e bola desenhadas e
         posicionadas (sem movimento, sem paredes ainda — ver nota de
-        orçamento de ciclos no `main.asm`). Aguardando validação no Stella.
+        orçamento de ciclos no `main.asm`). Validado no Stella em 2026-09-22;
+        ajuste cosmético aplicado (raquete esquerda `P0_X` 16→4).
   - [ ] Incremento 2 — joystick move as raquetes.
   - [ ] Incremento 3 — bola se move e quica nas bordas (topo/base).
   - [ ] Incremento 4 — colisão bola↔raquete (hardware, `CXP0FB`/`CXP1FB`) + bip.
