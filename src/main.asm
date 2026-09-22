@@ -1,6 +1,22 @@
 ; Pong para Atari 2600 (NTSC)
-; Marco 0, Incremento 2: joystick move as raquetes (P0/P1). Base: Incremento 1
-; (raquetes e bola estaticas, validado no Stella em 2026-09-22).
+; Marco 0, Incremento 2 (correcao): joystick move as raquetes (P0/P1).
+; Base: Incremento 1 (raquetes e bola estaticas, validado no Stella em
+; 2026-09-22). Correcoes de 2026-09-22 apos feedback:
+;
+; 1) "bola desloca sutilmente ao mover a raquete esquerda": nao ha, no
+;    codigo, nenhum caminho logico entre P0Y/P0YEnd e a bola (RAM sem
+;    sobreposicao, indices de SetHorizPos conferidos no .sym). O
+;    reposicionamento horizontal (SetHorizPos + HMOVE) rodava todo frame
+;    mesmo sem nada mudar de posicao horizontal ainda — reforcar o HMOVE a
+;    toa expoe ao efeito "HMOVE comb" (artefato documentado da TIA: o
+;    strobe pode deslocar 1 pixel um objeto mesmo com ajuste zero). Agora
+;    o posicionamento horizontal roda uma unica vez, no Reset. Se o efeito
+;    persistir mesmo assim, e mais provavel ilusao de otica (movimento
+;    induzido por um objeto proximo se movendo) do que bug de posicao.
+; 2) "pedaco da raquete direita aparece no topo quando encostada embaixo":
+;    GRP0/GRP1/ENABL nunca eram zerados fora do kernel visivel, entao o
+;    ultimo valor da linha 191 sobrevivia por todo o VSYNC/VBLANK do frame
+;    seguinte. Agora sao zerados explicitamente ao fim da area visivel.
 ;
 ; Paredes topo/base ficam de fora desta passada de proposito: o kernel de
 ; 192 linhas tem orcamento de 76 ciclos de CPU por scanline. Com raquetes +
@@ -13,8 +29,7 @@
 ; o kernel visivel), mas cada bloco (P0, P1) fica em sua propria linha com
 ; WSYNC proprio — sem isso, ~40 ciclos de logica por raquete podem passar de
 ; 76 ciclos e "vazar" para a linha seguinte, desalinhando as 37 linhas do
-; VBLANK. Por isso o loop de espera cai de 33 para 31 (3 posicionamento + 1
-; HMOVE/HMCLR + 1 P0 + 1 P1 + 31 espera = 37).
+; VBLANK.
 
         processor 6502
         include "vcs.h"
@@ -76,6 +91,25 @@ Reset
         lda #BALL_Y_INIT
         sta BallY
 
+        ; Posicionamento horizontal: feito uma unica vez aqui. Neste
+        ; incremento nada muda de posicao horizontal (raquetes so se movem
+        ; na vertical, bola ainda parada); repetir isso todo frame so
+        ; reforcaria o HMOVE sem necessidade. Quando a bola comecar a se
+        ; mover (Incremento 3), o reposicionamento dela volta para o
+        ; MainLoop (P0/P1 continuam fixos na horizontal).
+        lda #P0_X
+        ldx #0
+        jsr SetHorizPos          ; P0
+        lda #P1_X
+        ldx #1
+        jsr SetHorizPos          ; P1
+        lda #BALL_X_INIT
+        ldx #4
+        jsr SetHorizPos          ; BL
+        sta WSYNC
+        sta HMOVE
+        sta HMCLR
+
 MainLoop
         ; --- VSYNC: 3 linhas ---
         lda #2
@@ -86,23 +120,9 @@ MainLoop
         lda #0
         sta VSYNC
 
-        ; --- VBLANK: 37 linhas (4 usadas p/ posicionamento horizontal, 33 de espera) ---
+        ; --- VBLANK: 37 linhas (1 P0 + 1 P1 + 35 de espera) ---
         lda #2
         sta VBLANK
-
-        lda #P0_X
-        ldx #0
-        jsr SetHorizPos          ; P0
-        lda #P1_X
-        ldx #1
-        jsr SetHorizPos          ; P1
-        lda #BALL_X_INIT
-        ldx #4
-        jsr SetHorizPos          ; BL
-
-        sta WSYNC
-        sta HMOVE
-        sta HMCLR
 
         ; --- move raquete P0 (joystick 0 = porta esquerda: bit4=Up, bit5=Down) ---
         sta WSYNC
@@ -164,7 +184,7 @@ SkipP1Down
         adc #PADDLE_HT
         sta P1YEnd
 
-        ldx #31
+        ldx #35
 VBlankLoop
         sta WSYNC
         dex
@@ -208,6 +228,14 @@ SkipBall
         inx
         cpx #192
         bne KernelLoop
+
+        ; zera os objetos ao sair da area visivel: sem isso, o ultimo valor
+        ; escrito na linha 191 (ex.: raquete encostada no limite inferior)
+        ; sobrevive por todo o VSYNC/VBLANK do proximo frame.
+        lda #0
+        sta GRP0
+        sta GRP1
+        sta ENABL
 
         ; --- Overscan: 30 linhas ---
         lda #2
