@@ -1,11 +1,13 @@
 ; Pong para Atari 2600 (NTSC)
 ;
-; Estado atual (2026-09-22): Marco 0, Incremento 3.
+; Estado atual (2026-09-22): Marco 0, Incremento 5 — completa o spike.
 ;   - P0/P1 (raquetes): joystick move na vertical; posicao horizontal fixa,
 ;     definida uma unica vez no Reset.
-;   - BL (bola): se move e quica no topo/base (regra definitiva). Tambem
-;     quica nas laterais por enquanto — placeholder ate colisao com raquete
-;     e pontuacao (Incrementos 4/5), que vao substituir o quique lateral.
+;   - BL (bola): se move, quica no topo/base (paredes visuais reintroduzidas
+;     no Incremento 5), colide com as raquetes (hardware) e soma ponto pro
+;     adversario quando passa reto por uma raquete.
+;   - Placar (ScoreP0/ScoreP1) contado em RAM, sem exibicao visual ainda —
+;     digitos na tela ficam para depois do Marco 0 (ja previsto no README).
 ;
 ; Historico de bugs corrigidos (Incremento 2, 2026-09-22):
 ;   1) Deslocamento subito de ~1px em objetos ao mexer no joystick: causa
@@ -21,11 +23,6 @@
 ;   3) Bola sumindo com as raquetes na metade superior da tela: causa era a
 ;      bola ter so 1 scanline de altura (objeto fino demais para renderizar
 ;      de forma confiavel). Corrigido aumentando para 2 scanlines.
-;
-; Paredes topo/base (visuais) ficam de fora desta passada de proposito: o
-; kernel de 192 linhas tem orcamento de 76 ciclos de CPU por scanline, e ja
-; esta perto do limite so com raquetes + bola. Reintroduzir num incremento a
-; parte, com folga para conferir.
 ;
 ; Timing do VBLANK: usa o timer de hardware do RIOT (TIMER_SETUP/TIMER_WAIT,
 ; do macro.h) em vez de contar WSYNCs a mao. Motivo (bug real encontrado em
@@ -77,6 +74,7 @@ PADDLE_SPEED   = 3              ; scanlines por frame, ao segurar o joystick
                                  ; a bola pelo menos 1/3 mais lenta que a
                                  ; raquete: (3-2)/3 = 33%)
 PADDLE_Y_MAX   = 192-PADDLE_HT  ; maior valor valido de P0Y/P1Y (base = linha 191)
+WALL_HT        = 8              ; espessura das paredes topo/base, em scanlines
 BALL_HT        = 4              ; altura da bola, em scanlines (era 2)
 BALL_SIZE      = %00100000      ; CTRLPF: bola com 4 color clocks de largura
                                  ; (era 8 — testado largo demais depois do
@@ -95,8 +93,8 @@ COLOR_WHITE    = $0E
 ; conferir essa paridade de novo (ou trocar por comparacao "<=").
 BALL_X_MIN     = 2
 BALL_X_MAX     = 158
-BALL_Y_MIN     = 0
-BALL_Y_MAX     = 192-BALL_HT
+BALL_Y_MIN     = WALL_HT              ; quica na face interna da parede,
+BALL_Y_MAX     = 192-WALL_HT-BALL_HT  ; nao no limite absoluto da tela
 BALL_SPEED     = 2              ; pixels/frame em cada eixo. Teste: 1px/frame
                                  ; parecia "aos saltos" em monitor/emulador
                                  ; (sem persistencia de fosforo de um CRT).
@@ -117,6 +115,14 @@ SOUND_HIT_TONE = 4              ; AUDC0: "pure tone" (onda quadrada limpa).
 SOUND_HIT_FREQ = 4              ; AUDF0: agudo (valor baixo = frequencia alta)
 SOUND_HIT_VOL  = 12             ; AUDV0: volume (0-15)
 SOUND_HIT_LEN  = 4              ; duracao do bip, em frames
+
+; som de ponto marcado: mais grave e mais longo que o bip de colisao, pra
+; dar pra distinguir os dois mesmo sem placar visual ainda (dígitos ficam
+; pra depois do Marco 0, ja previsto no README)
+SOUND_SCORE_TONE = 12           ; AUDC0: "div 6 pure tone" (mais grave)
+SOUND_SCORE_FREQ = 20
+SOUND_SCORE_VOL  = 12
+SOUND_SCORE_LEN  = 15
 
 P0_X           = 4              ; posicao horizontal fixa da raquete esquerda
                                  ; (ajustado: 3x a largura da raquete a menos
@@ -142,6 +148,8 @@ BallYEnd ds 1                   ; BallY + BALL_HT (pre-calculado)
 BallDX  ds 1                    ; velocidade horizontal: +-BALL_SPEED
 BallDY  ds 1                    ; velocidade vertical: +-BALL_SPEED
 SoundTimer ds 1                 ; frames restantes do bip de colisao (0 = silencio)
+ScoreP0 ds 1                    ; pontos do jogador da esquerda (sem exibicao
+ScoreP1 ds 1                    ; visual ainda — ver nota no Incremento 5)
 
         SEG code
         ORG $F000
@@ -310,27 +318,35 @@ NoBottomBounce
         adc #BALL_HT
         sta BallYEnd
 
-        ; --- move a bola: quique horizontal (placeholder ate paddle/pontuacao) ---
+        ; --- move a bola: horizontal — deteccao de ponto ---
+        ; Se a bola chega a BALL_X_MIN/MAX, e porque passou pela raquete
+        ; sem colidir (colisao real ja teria invertido BallDX antes disso,
+        ; no bloco de colisao apos o kernel visivel). Substitui o quique
+        ; lateral placeholder do Incremento 3.
         lda BallX
         cmp #BALL_X_MIN
-        bne NoLeftBounce
-        lda BallDX
-        bpl NoLeftBounce         ; ja indo pra direita (>=0), nada a fazer
-        lda #BALL_SPEED
-        sta BallDX
-NoLeftBounce
+        bne NoScoreP1
+        inc ScoreP1              ; bola passou pela raquete esquerda -> ponto do jogador da direita
+        jsr StartScoreSound
+        jsr ResetBall
+        jmp BallMoveDone
+NoScoreP1
         lda BallX
         cmp #BALL_X_MAX
-        bne NoRightBounce
-        lda BallDX
-        bmi NoRightBounce        ; ja indo pra esquerda (<0), nada a fazer
-        lda #-BALL_SPEED
-        sta BallDX
-NoRightBounce
+        bne NoScoreP0
+        inc ScoreP0              ; bola passou pela raquete direita -> ponto do jogador da esquerda
+        jsr StartScoreSound
+        jsr ResetBall
+        jmp BallMoveDone
+NoScoreP0
         lda BallX
         clc
         adc BallDX
         sta BallX
+BallMoveDone
+        ; recarrega A explicitamente: nos caminhos de ponto marcado, A saiu
+        ; do ResetBall/StartScoreSound com outro valor, nao com BallX
+        lda BallX
 
         ; reposiciona a bola na horizontal (unico objeto que ainda se move
         ; na horizontal neste incremento). SetHorizPos faz seu proprio
@@ -366,44 +382,124 @@ NoRightBounce
         lda #0
         sta VBLANK
 
-        ; --- Area visivel: 192 linhas ---
+        ; --- Area visivel: 192 linhas, em 3 zonas (parede topo / meio / parede
+        ; base). As paredes sao so cor de fundo (COLUBK), nao objetos reais —
+        ; sem colisao de hardware com a bola (o quique perto delas e feito
+        ; via BALL_Y_MIN/MAX, ver bloco de movimento no VBLANK).
+        ;
+        ; Por que 3 zonas em vez de checar "e parede?" dentro de 1 loop so:
+        ; ja fizemos essa conta no Incremento 1 — comparar contra WALL_HT em
+        ; toda linha custa ~15-17 ciclos extras, o que estoura o orcamento de
+        ; 76/scanline somado a raquetes+bola (~61). Com 3 zonas, a cor de
+        ; fundo e fixada 1x por zona (fora do loop), e o corpo de cada loop
+        ; fica identico ao de antes (~61 ciclos), so triplicado no codigo.
         inc Frame
+
+        lda #COLOR_WHITE
+        sta COLUBK
         ldx #0
-KernelLoop
-        ; raquete esquerda (P0): acesa se P0Y <= X < P0YEnd
+TopWallLoop
         lda #0
         cpx P0Y
-        bcc SkipP0
+        bcc SkipTP0
         cpx P0YEnd
-        bcs SkipP0
+        bcs SkipTP0
         lda #PADDLE_PATTERN
-SkipP0
+SkipTP0
         sta GRP0
 
-        ; raquete direita (P1)
         lda #0
         cpx P1Y
-        bcc SkipP1
+        bcc SkipTP1
         cpx P1YEnd
-        bcs SkipP1
+        bcs SkipTP1
         lda #PADDLE_PATTERN
-SkipP1
+SkipTP1
         sta GRP1
 
-        ; bola: acesa se BallY <= X < BallYEnd (BALL_HT scanlines)
         lda #0
         cpx BallY
-        bcc SkipBall
+        bcc SkipTBall
         cpx BallYEnd
-        bcs SkipBall
-        lda #%00000010           ; ENABL bit 1
-SkipBall
+        bcs SkipTBall
+        lda #%00000010
+SkipTBall
+        sta ENABL
+
+        sta WSYNC
+        inx
+        cpx #WALL_HT
+        bne TopWallLoop
+
+        lda #0
+        sta COLUBK
+MidLoop
+        lda #0
+        cpx P0Y
+        bcc SkipMP0
+        cpx P0YEnd
+        bcs SkipMP0
+        lda #PADDLE_PATTERN
+SkipMP0
+        sta GRP0
+
+        lda #0
+        cpx P1Y
+        bcc SkipMP1
+        cpx P1YEnd
+        bcs SkipMP1
+        lda #PADDLE_PATTERN
+SkipMP1
+        sta GRP1
+
+        lda #0
+        cpx BallY
+        bcc SkipMBall
+        cpx BallYEnd
+        bcs SkipMBall
+        lda #%00000010
+SkipMBall
+        sta ENABL
+
+        sta WSYNC
+        inx
+        cpx #192-WALL_HT
+        bne MidLoop
+
+        lda #COLOR_WHITE
+        sta COLUBK
+BottomWallLoop
+        lda #0
+        cpx P0Y
+        bcc SkipBP0
+        cpx P0YEnd
+        bcs SkipBP0
+        lda #PADDLE_PATTERN
+SkipBP0
+        sta GRP0
+
+        lda #0
+        cpx P1Y
+        bcc SkipBP1
+        cpx P1YEnd
+        bcs SkipBP1
+        lda #PADDLE_PATTERN
+SkipBP1
+        sta GRP1
+
+        lda #0
+        cpx BallY
+        bcc SkipBBall
+        cpx BallYEnd
+        bcs SkipBBall
+        lda #%00000010
+SkipBBall
         sta ENABL
 
         sta WSYNC
         inx
         cpx #192
-        bne KernelLoop
+        bne BottomWallLoop
 
         ; zera os objetos ao sair da area visivel: sem isso, o ultimo valor
         ; escrito na linha 191 (ex.: raquete encostada no limite inferior)
@@ -492,6 +588,40 @@ StartHitSound
         sta AUDV0
         lda #SOUND_HIT_LEN
         sta SoundTimer
+        rts
+
+; ---------------------------------------------------------------------------
+; StartScoreSound - inicia o som de ponto marcado (mais grave/longo que o
+; bip de colisao, ver StartHitSound). Mesmo mecanismo de desligar sozinho
+; via SoundTimer.
+; ---------------------------------------------------------------------------
+StartScoreSound
+        lda #SOUND_SCORE_TONE
+        sta AUDC0
+        lda #SOUND_SCORE_FREQ
+        sta AUDF0
+        lda #SOUND_SCORE_VOL
+        sta AUDV0
+        lda #SOUND_SCORE_LEN
+        sta SoundTimer
+        rts
+
+; ---------------------------------------------------------------------------
+; ResetBall - devolve a bola ao centro da tela, com velocidade inicial, apos
+; um ponto marcado. Nao mexe em P0/P1 (raquetes ficam onde estavam).
+; ---------------------------------------------------------------------------
+ResetBall
+        lda #BALL_X_INIT
+        sta BallX
+        lda #BALL_Y_INIT
+        sta BallY
+        clc
+        adc #BALL_HT
+        sta BallYEnd
+        lda #BALL_DX_INIT
+        sta BallDX
+        lda #BALL_DY_INIT
+        sta BallDY
         rts
 
         ORG $FFFC
