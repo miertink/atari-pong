@@ -1,8 +1,6 @@
 ; Pong para Atari 2600 (NTSC)
-; Marco 0, Incremento 1: raquetes (P0/P1) e bola (BL) desenhadas e
-; posicionadas, sem movimento ainda. Objetivo: validar o posicionamento
-; horizontal (rotina SetHorizPos) e o desenho por comparacao de scanline
-; antes de adicionar joystick, fisica da bola e colisao.
+; Marco 0, Incremento 2: joystick move as raquetes (P0/P1). Base: Incremento 1
+; (raquetes e bola estaticas, validado no Stella em 2026-09-22).
 ;
 ; Paredes topo/base ficam de fora desta passada de proposito: o kernel de
 ; 192 linhas tem orcamento de 76 ciclos de CPU por scanline. Com raquetes +
@@ -10,6 +8,13 @@
 ; de parede (COLUBK por linha) passaria de 76 no calculo a mao — melhor
 ; validar o nucleo primeiro e reintroduzir parede num incremento a parte,
 ; com folga para conferir.
+;
+; Leitura de joystick: feita durante o VBLANK (nao critico ciclo a ciclo como
+; o kernel visivel), mas cada bloco (P0, P1) fica em sua propria linha com
+; WSYNC proprio — sem isso, ~40 ciclos de logica por raquete podem passar de
+; 76 ciclos e "vazar" para a linha seguinte, desalinhando as 37 linhas do
+; VBLANK. Por isso o loop de espera cai de 33 para 31 (3 posicionamento + 1
+; HMOVE/HMCLR + 1 P0 + 1 P1 + 31 espera = 37).
 
         processor 6502
         include "vcs.h"
@@ -18,6 +23,8 @@
 ; ---- Constantes de geometria/cor ----
 PADDLE_HT      = 16             ; altura da raquete, em scanlines
 PADDLE_PATTERN = %00111100      ; padrao de bits da raquete (GRP0/GRP1)
+PADDLE_SPEED   = 2              ; scanlines por frame, ao segurar o joystick
+PADDLE_Y_MAX   = 192-PADDLE_HT  ; maior valor valido de P0Y/P1Y (base = linha 191)
 BALL_SIZE      = %00010000      ; CTRLPF: bola com 2 color clocks de largura
 COLOR_WHITE    = $0E
 
@@ -97,7 +104,67 @@ MainLoop
         sta HMOVE
         sta HMCLR
 
-        ldx #33
+        ; --- move raquete P0 (joystick 0 = porta esquerda: bit4=Up, bit5=Down) ---
+        sta WSYNC
+        lda SWCHA
+        and #%00010000
+        bne SkipP0Up
+        lda P0Y
+        sec
+        sbc #PADDLE_SPEED
+        bcs P0UpOk
+        lda #0
+P0UpOk
+        sta P0Y
+SkipP0Up
+        lda SWCHA
+        and #%00100000
+        bne SkipP0Down
+        lda P0Y
+        clc
+        adc #PADDLE_SPEED
+        cmp #PADDLE_Y_MAX+1
+        bcc P0DownOk
+        lda #PADDLE_Y_MAX
+P0DownOk
+        sta P0Y
+SkipP0Down
+        lda P0Y
+        clc
+        adc #PADDLE_HT
+        sta P0YEnd
+
+        ; --- move raquete P1 (joystick 1 = porta direita: bit0=Up, bit1=Down) ---
+        sta WSYNC
+        lda SWCHA
+        and #%00000001
+        bne SkipP1Up
+        lda P1Y
+        sec
+        sbc #PADDLE_SPEED
+        bcs P1UpOk
+        lda #0
+P1UpOk
+        sta P1Y
+SkipP1Up
+        lda SWCHA
+        and #%00000010
+        bne SkipP1Down
+        lda P1Y
+        clc
+        adc #PADDLE_SPEED
+        cmp #PADDLE_Y_MAX+1
+        bcc P1DownOk
+        lda #PADDLE_Y_MAX
+P1DownOk
+        sta P1Y
+SkipP1Down
+        lda P1Y
+        clc
+        adc #PADDLE_HT
+        sta P1YEnd
+
+        ldx #31
 VBlankLoop
         sta WSYNC
         dex
