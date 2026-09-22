@@ -68,7 +68,9 @@
         include "macro.h"
 
 ; ---- Constantes de geometria/cor ----
-PADDLE_HT      = 16             ; altura da raquete, em scanlines
+PADDLE_HT      = 32             ; altura da raquete, em scanlines (era 16 —
+                                 ; dobrada a pedido do usuario, melhora
+                                 ; jogabilidade)
 PADDLE_PATTERN = %00111100      ; padrao de bits da raquete (GRP0/GRP1)
 PADDLE_SPEED   = 3              ; scanlines por frame, ao segurar o joystick
                                  ; (era 2, igual a BALL_SPEED — usuario pediu
@@ -121,8 +123,10 @@ P0_X           = 4              ; posicao horizontal fixa da raquete esquerda
                                  ; que os 16 originais, a pedido do usuario)
 P1_X           = 140            ; posicao horizontal fixa da raquete direita
 BALL_X_INIT    = 80             ; posicao horizontal inicial da bola (centro)
-P0_Y_INIT      = 88             ; topo da raquete esquerda (linha 0-191)
-P1_Y_INIT      = 88
+P0_Y_INIT      = 80             ; topo da raquete esquerda (linha 0-191);
+                                 ; recalculado para o centro da tela com
+                                 ; PADDLE_HT=32 (era 88, para PADDLE_HT=16)
+P1_Y_INIT      = 80
 BALL_Y_INIT    = 96
 
         SEG.U vars
