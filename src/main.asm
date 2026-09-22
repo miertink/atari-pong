@@ -118,6 +118,28 @@ SOUND_SCORE_LEN  = 15
 ; the end of DigitFont, corrupting the display.
 SCORE_TO_WIN   = 5
 
+; Score digits use their own colors (not the paddle/ball white) — COLUP0/
+; COLUP1 swapped in for the score row only, then restored. Exact hues are
+; easy to retune here if they don't read as intended on screen.
+SCORE_P0_COLOR = $2E            ; warm orange/gold
+SCORE_P1_COLOR = $9E            ; cool blue
+
+; NUSIZ0 packs two unrelated things in one register: player-0 copy/size
+; (bits 0-2) and missile-0 width (bits 4-5). Two combined values, since
+; both P0 and the missile-0 net line share it at different points in the
+; frame:
+NUSIZ0_SCORE   = %00010101      ; double-width P0 (score row) + net width
+NUSIZ0_PLAY    = %00010000      ; normal-width P0 (paddle) + net width
+NUSIZ1_SCORE   = %00000101      ; double-width P1 (score row only; P1 has
+                                 ; no missile, so no width bits needed)
+
+; Center net: a dashed vertical line down the middle of the play area
+; (classic tennis-net look), drawn with the otherwise-unused missile 0.
+; Toggled on/off via bit 1 of the scanline counter — 2 lines on, 2 off —
+; which conveniently IS ENAM0's enable bit, so no branching is needed per
+; line (see MidLoop).
+NET_X          = 80             ; horizontal center, same column as the ball
+
 P0_X           = 4              ; left paddle's fixed horizontal position
 P1_X           = 140            ; right paddle's fixed horizontal position
 BALL_X_INIT    = 80             ; ball's initial horizontal position (center)
@@ -167,6 +189,9 @@ Reset
         lda #BALL_SIZE
         sta CTRLPF
 
+        lda #NUSIZ0_PLAY         ; missile-0 (net) width; player width stays
+        sta NUSIZ0               ; normal until the score row overrides it
+
         lda #P0_Y_INIT
         sta P0Y
         clc
@@ -197,6 +222,9 @@ Reset
         lda #P1_X
         ldx #1
         jsr SetHorizPos          ; P1
+        lda #NET_X
+        ldx #2
+        jsr SetHorizPos          ; M0 (center net)
         lda #BALL_X_INIT
         ldx #4
         jsr SetHorizPos          ; BL
@@ -465,9 +493,14 @@ BallMoveDone
         adc #0
         sta P1FontPtr+1
 
-        lda #%00000101           ; NUSIZ: double-width player graphics
-        sta NUSIZ0
+        lda #NUSIZ0_SCORE        ; double-width P0 + net width (net isn't
+        sta NUSIZ0               ; drawn here, but its width bits live here)
+        lda #NUSIZ1_SCORE        ; double-width P1
         sta NUSIZ1
+        lda #SCORE_P0_COLOR
+        sta COLUP0
+        lda #SCORE_P1_COLOR
+        sta COLUP1
 
         lda #0
         sta COLUBK
@@ -486,9 +519,13 @@ ScoreRepeatLoop
         cpy #FONT_ROWS
         bne ScoreRowLoop
 
-        lda #0
-        sta NUSIZ0                ; back to normal width for the paddles
+        lda #NUSIZ0_PLAY         ; normal-width P0, keep the net's width
+        sta NUSIZ0
+        lda #0                   ; normal-width P1
         sta NUSIZ1
+        lda #COLOR_WHITE         ; paddles/ball/net go back to white
+        sta COLUP0
+        sta COLUP1
 
         lda #COLOR_WHITE
         sta COLUBK
@@ -556,11 +593,19 @@ SkipMP1
 SkipMBall
         sta ENABL
 
+        ; center net: 2 lines on / 2 off. Bit 1 of the scanline counter IS
+        ; ENAM0's enable bit, so this needs no branch — see NET_X's note.
+        txa
+        and #%00000010
+        sta ENAM0
+
         sta WSYNC
         inx
         cpx #192-WALL_HT
         bne MidLoop
 
+        lda #0
+        sta ENAM0                ; net stops at the bottom of the play area
         lda #COLOR_WHITE
         sta COLUBK
 BottomWallLoop
@@ -603,6 +648,7 @@ SkipBBall
         sta GRP0
         sta GRP1
         sta ENABL
+        sta ENAM0
 
         ; --- ball<->paddle collision (hardware) ---
         ; CXP0FB/CXP1FB accumulate collisions across the whole visible
