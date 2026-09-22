@@ -48,7 +48,11 @@
 PADDLE_HT      = 32             ; paddle height, in scanlines
 PADDLE_PATTERN = %00111100      ; paddle bit pattern (GRP0/GRP1)
 PADDLE_SPEED   = 3              ; scanlines/frame while holding the joystick
-SCORE_HT       = 5              ; score row height, in scanlines (see below)
+FONT_ROWS      = 5              ; DigitFont height, in raw font rows
+SCORE_SCALE    = 3              ; each font row is drawn for this many
+                                 ; scanlines — makes the digits big, closer
+                                 ; to classic Pong's scale (5x1 looked tiny)
+SCORE_HT       = FONT_ROWS*SCORE_SCALE  ; total score row height, in scanlines
 PADDLE_Y_MIN   = SCORE_HT        ; lowest valid P0Y/P1Y — paddles can't reach
                                  ; into the score row at the very top
 PADDLE_Y_MAX   = 192-PADDLE_HT  ; highest valid P0Y/P1Y (bottom = line 191)
@@ -102,10 +106,12 @@ SOUND_SCORE_LEN  = 15
 ; so they can't also be showing the paddles on those same lines. Solved the
 ; classic Pong way — a dedicated SCORE_HT-line row at the very top of the
 ; frame, before the wall/play zones, where paddles never appear (clamped
-; via PADDLE_Y_MIN above). DigitFont holds 10 digits x SCORE_HT bytes each
-; (0-9), one byte per row, pattern centered in the byte the same way
-; PADDLE_PATTERN is (bits 5-2) — same safe horizontal margin already
-; validated for the paddles at P0_X/P1_X.
+; via PADDLE_Y_MIN above). Digits are drawn big (SCORE_SCALE vertical
+; repeat + double width via NUSIZ0/NUSIZ1 during the score row only), to
+; read closer to classic Pong's scale rather than a thin sliver. DigitFont
+; holds 10 digits x FONT_ROWS bytes each (0-9), one byte per row, pattern
+; centered in the byte the same way PADDLE_PATTERN is (bits 5-2) — same
+; safe horizontal margin already validated for the paddles at P0_X/P1_X.
 ;
 ; SCORE_TO_WIN resets both scores to 0 once reached — not just a nicety:
 ; without a cap, a long session could push a score past 9 and index off
@@ -430,13 +436,16 @@ BallMoveDone
         inc Frame
 
         ; --- score row: SCORE_HT lines, P0/P1 draw digits instead of
-        ; paddles. Font pointers computed once here (score*SCORE_HT +
-        ; table base), then just indexed by row inside the loop.
+        ; paddles. Font pointers computed once here (score*FONT_ROWS +
+        ; table base), then just indexed by row inside the loop. Double
+        ; width (NUSIZ0/NUSIZ1) applies only here — reset to normal before
+        ; the paddles draw below, or PADDLE_PATTERN would come out double
+        ; size too.
         lda ScoreP0
         asl
         asl
         clc
-        adc ScoreP0              ; A = ScoreP0*5 (SCORE_HT)
+        adc ScoreP0              ; A = ScoreP0*5 (FONT_ROWS)
         clc
         adc #<DigitFont
         sta P0FontPtr
@@ -456,18 +465,30 @@ BallMoveDone
         adc #0
         sta P1FontPtr+1
 
+        lda #%00000101           ; NUSIZ: double-width player graphics
+        sta NUSIZ0
+        sta NUSIZ1
+
         lda #0
         sta COLUBK
-        ldy #0
-ScoreLoop
+        ldy #0                   ; font row (0..FONT_ROWS-1)
+ScoreRowLoop
         lda (P0FontPtr),y
         sta GRP0
         lda (P1FontPtr),y
         sta GRP1
+        ldx #SCORE_SCALE         ; hold this row for SCORE_SCALE scanlines
+ScoreRepeatLoop
         sta WSYNC
+        dex
+        bne ScoreRepeatLoop
         iny
-        cpy #SCORE_HT
-        bne ScoreLoop
+        cpy #FONT_ROWS
+        bne ScoreRowLoop
+
+        lda #0
+        sta NUSIZ0                ; back to normal width for the paddles
+        sta NUSIZ1
 
         lda #COLOR_WHITE
         sta COLUBK
@@ -653,7 +674,8 @@ OverscanLoop
         jmp MainLoop
 
 ; ---------------------------------------------------------------------------
-; DigitFont - 10 digits (0-9) x SCORE_HT(5) bytes, one byte per scanline row,
+; DigitFont - 10 digits (0-9) x FONT_ROWS(5) bytes, one byte per font row
+; (each drawn SCORE_SCALE scanlines tall on screen — see ScoreRowLoop),
 ; top row first. Each byte's pattern is centered in bits 5-2, the same
 ; alignment as PADDLE_PATTERN, so the digits sit at the same safe
 ; horizontal margin already validated for the paddles at P0_X/P1_X.
