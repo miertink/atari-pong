@@ -40,15 +40,28 @@
 ; ciclos, nao so orcamento) — regressao real cometida e corrigida na mesma
 ; investigacao (raquetes chegaram a se mover sozinhas por causa disso).
 ;
-; Gangueira residual apos os fixes acima ("para e pula", salto maior que o
-; passo normal, a cada ~7-8 frames): diagnosticada empiricamente (fundo da
-; tela piscando com Frame e depois com BallX) como NAO sendo bug — RAM e
-; timing confirmados corretos a cada frame. Causa: a bola tinha so 2 color
-; clocks de largura, e o passo de 2px/frame era comparavel ao proprio
-; tamanho dela — imperceptivel visualmente. So o salto do "grupo grosso" do
-; SetHorizPos (a cada ~15 unidades de X, ~7-8 frames na velocidade 2) era
-; grande o suficiente pra aparecer, dando efeito de "para e pula". Corrigido
-; aumentando a largura visual da bola (BALL_SIZE) para 8 color clocks.
+; Gangueira residual apos os fixes acima ("para e pula"/"galopa em vez de
+; deslizar", salto maior que o passo normal, a cada ~7-8 frames):
+; diagnosticada empiricamente (fundo da tela piscando com Frame e depois
+; com BallX) como NAO sendo bug de dados/timing geral — RAM e frame rate
+; confirmados corretos a cada frame. Primeira hipotese (bola fina demais
+; pro passo de 2px aparecer) testada e DESCARTADA — aumentar a largura para
+; 8 color clocks nao mudou nada, provando que o movimento era mesmo
+; discreto, nao so dificil de perceber.
+;
+; Causa raiz real: no bloco "move a bola" do MainLoop, HMCLR era estrobado
+; so 3 ciclos depois do HMOVE. Suspeita: a injecao do ajuste fino do HMOVE
+; nao e instantanea, e zerar HMBL cedo demais cortava essa injecao antes de
+; completar — so o reposicionamento grosso (RESBL, que nao depende do
+; HMOVE) sobrevivia, dando saltos de ~15 unidades a cada ~7-8 frames em vez
+; de deslizar 2px por vez. Remover o HMCLR dali (nao e necessario — HMBL e
+; reescrito do zero pelo SetHorizPos antes do PROXIMO HMOVE) resolveu,
+; confirmado pelo usuario. O mesmo HMCLR no Reset (que posiciona P0/P1/BL
+; uma unica vez) provavelmente causava o residual de ~1px aceito la atras
+; como "particularidade do emulador" — mantido ali, mas com um WSYNC extra
+; de folga antes de zerar (nao pode ser removido, senao o HMOVE da bola no
+; MainLoop reaplicaria o HMP0/HMP1 do Reset a cada frame — o bug das
+; raquetes se movendo sozinhas, ja corrigido antes).
 
         processor 6502
         include "vcs.h"
@@ -59,13 +72,11 @@ PADDLE_HT      = 16             ; altura da raquete, em scanlines
 PADDLE_PATTERN = %00111100      ; padrao de bits da raquete (GRP0/GRP1)
 PADDLE_SPEED   = 2              ; scanlines por frame, ao segurar o joystick
 PADDLE_Y_MAX   = 192-PADDLE_HT  ; maior valor valido de P0Y/P1Y (base = linha 191)
-BALL_HT        = 2              ; altura da bola, em scanlines
-BALL_SIZE      = %00110000      ; CTRLPF: bola com 8 color clocks de largura
-                                 ; (era 2 — passo de 2px/frame era comparavel
-                                 ; ao proprio tamanho da bola, imperceptivel;
-                                 ; so o salto do grupo "grosso" do
-                                 ; SetHorizPos (~15 unidades) ficava visivel,
-                                 ; dando efeito de "para e pula")
+BALL_HT        = 4              ; altura da bola, em scanlines (era 2)
+BALL_SIZE      = %00100000      ; CTRLPF: bola com 4 color clocks de largura
+                                 ; (era 8 — testado largo demais depois do
+                                 ; fix do HMCLR; ajuste cosmetico: mais
+                                 ; estreita e mais alta, a pedido do usuario)
 COLOR_WHITE    = $0E
 
 ; limites de quique da bola (0-159 horizontal, mesma escala usada por
@@ -167,6 +178,18 @@ Reset
         jsr SetHorizPos          ; BL
         sta WSYNC
         sta HMOVE
+        ; HMCLR NAO estrobado logo em seguida (mesma causa raiz do "desliza"
+        ; corrigido no MainLoop, ver comentario la): zerar HMOVE 3 ciclos
+        ; depois pode cortar a injecao do ajuste fino antes de completar.
+        ; Aqui a diferenca e que P0/P1/BL nao vao ser reposicionados de novo
+        ; tao cedo (P0/P1 nunca mais; a bola so no proximo frame), entao
+        ; HMP0/HMP1/HMBL PRECISAM ser zerados em algum momento — senao o
+        ; HMOVE da bola no MainLoop reaplicaria o valor de HMP0/HMP1 do
+        ; Reset a cada frame (foi exatamente o bug das raquetes se movendo
+        ; sozinhas, corrigido antes). Por isso aqui so adiamos o HMCLR (mais
+        ; um WSYNC de folga) em vez de tira-lo — o Reset roda uma vez so,
+        ; entao gastar uma linha extra nao custa nada.
+        sta WSYNC
         sta HMCLR
 
 MainLoop
@@ -309,7 +332,16 @@ NoRightBounce
         jsr SetHorizPos
         sta WSYNC
         sta HMOVE
-        sta HMCLR
+        ; SEM HMCLR aqui — confirmado pelo usuario que resolve a "gangueira"
+        ; (bola "galopando" em vez de deslizar). Causa raiz: HMCLR estrobado
+        ; so 3 ciclos depois do HMOVE cortava a injecao do ajuste fino antes
+        ; de completar; so o reposicionamento grosso (RESBL, que nao
+        ; depende do HMOVE) sobrevivia, dando saltos de ~15 unidades a cada
+        ; ~7-8 frames em vez de deslizar 2px por vez. Nao precisamos de
+        ; HMCLR aqui de qualquer forma: HMBL e reescrito do zero pelo
+        ; SetHorizPos antes do PROXIMO HMOVE, entao nao ha valor obsoleto
+        ; para vazar de um frame pro outro. (HMP0/HMP1 continuam OK porque
+        ; ja foram zerados uma vez no Reset — ver comentario la.)
 
         TIMER_WAIT
         lda #0
