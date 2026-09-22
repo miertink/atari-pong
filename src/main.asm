@@ -27,12 +27,19 @@
 ; esta perto do limite so com raquetes + bola. Reintroduzir num incremento a
 ; parte, com folga para conferir.
 ;
-; Timing do VBLANK: leitura de joystick e movimento da bola nao sao criticos
-; ciclo a ciclo como o kernel visivel, mas cada bloco logico (P0, P1,
-; quique-Y da bola, quique-X da bola, reposicionamento da bola) fica em sua
-; propria linha com WSYNC proprio — sem isso, o bloco combinado passaria
-; perto ou acima de 76 ciclos e "vazaria" para a linha seguinte,
-; desalinhando as 37 linhas do VBLANK.
+; Timing do VBLANK: usa o timer de hardware do RIOT (TIMER_SETUP/TIMER_WAIT,
+; do macro.h) em vez de contar WSYNCs a mao. Motivo (bug real encontrado em
+; 2026-09-22, reportado como "movimento da bola sofrivel/picotado"):
+; SetHorizPos usa um loop de "subtrai 15 ate estourar" cujo numero de
+; iteracoes varia com o valor de X. Para X pequeno (~4) custa ~30 ciclos; para
+; X grande (~150-159, exatamente a faixa perto da raquete direita) passa de
+; 80 ciclos — acima do orcamento de 76/scanline. Como a bola varre essa
+; faixa toda vez que se aproxima da lateral direita, esses frames especificos
+; ganhavam 1 scanline a mais (263 linhas em vez de 262), causando o
+; picotamento. Contar WSYNCs a mao so funciona para custo CONSTANTE por
+; linha; para custo variavel (SetHorizPos com X mudando todo frame), o timer
+; de hardware absorve a variacao automaticamente, sem precisar prever
+; quanto cada bloco vai gastar.
 
         processor 6502
         include "vcs.h"
@@ -144,13 +151,13 @@ MainLoop
         lda #0
         sta VSYNC
 
-        ; --- VBLANK: 37 linhas (1 P0 + 1 P1 + 1 bounce-Y + 1 bounce-X +
-        ; 1 SetHorizPos bola + 1 HMOVE/HMCLR + 31 de espera) ---
+        ; --- VBLANK: 37 linhas, reservadas via timer de hardware (ver nota
+        ; no cabecalho do arquivo) ---
         lda #2
         sta VBLANK
+        TIMER_SETUP 37
 
         ; --- move raquete P0 (joystick 0 = porta esquerda: bit4=Up, bit5=Down) ---
-        sta WSYNC
         lda SWCHA
         and #%00010000
         bne SkipP0Up
@@ -180,7 +187,6 @@ SkipP0Down
         sta P0YEnd
 
         ; --- move raquete P1 (joystick 1 = porta direita: bit0=Up, bit1=Down) ---
-        sta WSYNC
         lda SWCHA
         and #%00000001
         bne SkipP1Up
@@ -210,7 +216,6 @@ SkipP1Down
         sta P1YEnd
 
         ; --- move a bola: quique vertical (topo/base) ---
-        sta WSYNC
         lda BallY
         cmp #BALL_Y_MIN
         bne NoTopBounce
@@ -236,7 +241,6 @@ NoBottomBounce
         sta BallYEnd
 
         ; --- move a bola: quique horizontal (placeholder ate paddle/pontuacao) ---
-        sta WSYNC
         lda BallX
         cmp #BALL_X_MIN
         bne NoLeftBounce
@@ -259,18 +263,15 @@ NoRightBounce
         sta BallX
 
         ; reposiciona a bola na horizontal (unico objeto que ainda se move
-        ; na horizontal neste incremento)
+        ; na horizontal neste incremento). SetHorizPos faz seu proprio
+        ; WSYNC interno — necessario para o calculo de posicao (nao apenas
+        ; para timing geral, que o timer ja cobre).
         ldx #4
         jsr SetHorizPos
-        sta WSYNC
         sta HMOVE
         sta HMCLR
 
-        ldx #31
-VBlankLoop
-        sta WSYNC
-        dex
-        bne VBlankLoop
+        TIMER_WAIT
         lda #0
         sta VBLANK
 
