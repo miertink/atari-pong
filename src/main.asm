@@ -53,10 +53,12 @@ SCORE_SCALE    = 3              ; each font row is drawn for this many
                                  ; scanlines — makes the digits big, closer
                                  ; to classic Pong's scale (5x1 looked tiny)
 SCORE_HT       = FONT_ROWS*SCORE_SCALE  ; total score row height, in scanlines
-PADDLE_Y_MIN   = SCORE_HT        ; lowest valid P0Y/P1Y — paddles can't reach
-                                 ; into the score row at the very top
-PADDLE_Y_MAX   = 192-PADDLE_HT  ; highest valid P0Y/P1Y (bottom = line 191)
 WALL_HT        = 8              ; top/bottom wall thickness, in scanlines
+PADDLE_Y_MIN   = WALL_HT+SCORE_HT  ; lowest valid P0Y/P1Y — paddles can't
+                                 ; reach into the top wall or the score row
+                                 ; (both come before the play area — see
+                                 ; the visible-area zone order in MainLoop)
+PADDLE_Y_MAX   = 192-PADDLE_HT  ; highest valid P0Y/P1Y (bottom = line 191)
 BALL_HT        = 4              ; ball height, in scanlines
 BALL_SIZE      = %00100000      ; CTRLPF: ball width = 4 color clocks
 COLOR_WHITE    = $0E
@@ -449,11 +451,14 @@ BallMoveDone
         lda #0
         sta VBLANK
 
-        ; --- Visible area: 192 lines, in 4 zones (score row / top wall /
-        ; middle / bottom wall). The walls are just background color
-        ; (COLUBK), not real objects — no hardware collision with the ball
-        ; (bouncing near them is handled via BALL_Y_MIN/MAX in the VBLANK
-        ; move block).
+        ; --- Visible area: 192 lines, in 4 zones (top wall / score row /
+        ; middle / bottom wall). Order matches classic Pong: a thin wall at
+        ; the very top of the screen, with the score sitting INSIDE the
+        ; court just below it (not above the wall, outside the court —
+        ; that was the first version of this, and looked wrong for exactly
+        ; that reason). The walls are just background color (COLUBK), not
+        ; real objects — no hardware collision with the ball (bouncing
+        ; near them is handled via BALL_Y_MIN/MAX in the VBLANK move block).
         ;
         ; Why separate zones instead of checking "which zone is this line
         ; in?" inside a single loop: that costs extra cycles per line,
@@ -463,12 +468,49 @@ BallMoveDone
         ; unchanged, just repeated in source.
         inc Frame
 
-        ; --- score row: SCORE_HT lines, P0/P1 draw digits instead of
-        ; paddles. Font pointers computed once here (score*FONT_ROWS +
-        ; table base), then just indexed by row inside the loop. Double
-        ; width (NUSIZ0/NUSIZ1) applies only here — reset to normal before
-        ; the paddles draw below, or PADDLE_PATTERN would come out double
-        ; size too.
+        lda #COLOR_WHITE
+        sta COLUBK
+        ldx #0
+TopWallLoop
+        lda #0
+        cpx P0Y
+        bcc SkipTP0
+        cpx P0YEnd
+        bcs SkipTP0
+        lda #PADDLE_PATTERN
+SkipTP0
+        sta GRP0
+
+        lda #0
+        cpx P1Y
+        bcc SkipTP1
+        cpx P1YEnd
+        bcs SkipTP1
+        lda #PADDLE_PATTERN
+SkipTP1
+        sta GRP1
+
+        lda #0
+        cpx BallY
+        bcc SkipTBall
+        cpx BallYEnd
+        bcs SkipTBall
+        lda #%00000010
+SkipTBall
+        sta ENABL
+
+        sta WSYNC
+        inx
+        cpx #WALL_HT
+        bne TopWallLoop
+
+        ; --- score row: SCORE_HT lines, right below the top wall, still
+        ; inside the court (black background, matching the play field).
+        ; P0/P1 draw digits instead of paddles here. Font pointers
+        ; computed once (score*FONT_ROWS + table base), then just indexed
+        ; by row inside the loop. Double width (NUSIZ0/NUSIZ1) applies
+        ; only here — reset to normal before the paddles draw below, or
+        ; PADDLE_PATTERN would come out double size too.
         lda ScoreP0
         asl
         asl
@@ -527,44 +569,10 @@ ScoreRepeatLoop
         sta COLUP0
         sta COLUP1
 
-        lda #COLOR_WHITE
-        sta COLUBK
-        ldx #SCORE_HT
-TopWallLoop
-        lda #0
-        cpx P0Y
-        bcc SkipTP0
-        cpx P0YEnd
-        bcs SkipTP0
-        lda #PADDLE_PATTERN
-SkipTP0
-        sta GRP0
-
-        lda #0
-        cpx P1Y
-        bcc SkipTP1
-        cpx P1YEnd
-        bcs SkipTP1
-        lda #PADDLE_PATTERN
-SkipTP1
-        sta GRP1
-
-        lda #0
-        cpx BallY
-        bcc SkipTBall
-        cpx BallYEnd
-        bcs SkipTBall
-        lda #%00000010
-SkipTBall
-        sta ENABL
-
-        sta WSYNC
-        inx
-        cpx #SCORE_HT+WALL_HT
-        bne TopWallLoop
-
-        lda #0
-        sta COLUBK
+        ; ScoreRowLoop counts rows with Y, not X — X is still sitting at
+        ; WALL_HT from TopWallLoop's exit, so it needs to jump ahead
+        ; explicitly to where MidLoop's own line numbering expects it.
+        ldx #WALL_HT+SCORE_HT
 MidLoop
         lda #0
         cpx P0Y
