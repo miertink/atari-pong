@@ -206,9 +206,11 @@ and a randomized serve — all working and validated in Stella.
 - [x] Gameplay tuning after Marco 0: bigger/faster paddles, slower two-phase
   ball speed (serve vs. rally), randomized serve direction and angle
   (8-bit LFSR), paddle-movement "English" on the rebound.
-- [ ] On-screen scoreboard (digit kernel) — score is tracked in RAM but not
-  drawn yet, so there's no visible win condition at 5 points either; both
-  wait on the scoreboard kernel.
+- [x] **On-screen scoreboard:** a dedicated score row at the top of the
+  frame (P0/P1 draw digits there instead of paddles — paddles are clamped
+  out of that row, since the score display and the paddle graphics both
+  need the same two hardware objects). Reaching 5 points resets both
+  scores to a new game.
 - [ ] AI opponent, sound beyond the hit/score beeps.
 
 See `src/main.asm`'s header for the engineering notes worth remembering
