@@ -203,9 +203,17 @@ Consulta rápida para não sair do repositório.
       estável no Stella, sem rolling, degradê vertical correto. Loop de 262
       linhas validado.
 - [ ] **Marco 0 — Pong mínimo (spike):** 2 raquetes (P0/P1) movidas por
-      joystick, bola (BL), paredes em playfield, colisão por hardware e bip.
-      Aqui o spike e o núcleo do jogo coincidem.
-- [ ] Placar, saque, IA/modo 1 jogador, som e variações de velocidade.
+      joystick, bola (BL), colisão por hardware e bip. Regras: placar até 5,
+      sem aceleração da bola. Dividido em incrementos:
+  - [x] **Incremento 1 — objetos estáticos:** raquetes e bola desenhadas e
+        posicionadas (sem movimento, sem paredes ainda — ver nota de
+        orçamento de ciclos no `main.asm`). Aguardando validação no Stella.
+  - [ ] Incremento 2 — joystick move as raquetes.
+  - [ ] Incremento 3 — bola se move e quica nas bordas (topo/base).
+  - [ ] Incremento 4 — colisão bola↔raquete (hardware, `CXP0FB`/`CXP1FB`) + bip.
+  - [ ] Incremento 5 — paredes topo/base (reintroduzir, com orçamento de
+        ciclos ok) e detecção de ponto (bola passa da raquete).
+- [ ] Placar em tela (dígitos), IA como oponente, som além do bip de colisão.
 
 ### Candidatos por complexidade
 
@@ -219,10 +227,8 @@ Consulta rápida para não sair do repositório.
 
 ## 8. Decisões em aberto
 
-Resolvidas em 2026-09-21: jogo = Pong; alvo = NTSC.
+Resolvidas em 2026-09-21/22: jogo = Pong; alvo = NTSC; controle = joystick
+(paddle fica para depois, se fizer sentido); modos = 2 jogadores no Marco 0,
+IA como oponente entra depois; placar até 5; bola não acelera.
 
-1. **Controle:** joystick ou paddle (controle rotativo, o do Pong original)?
-   Paddle é mais fiel ao original e lê via `INPT0/INPT1` (ADC por
-   capacitor), com tratamento diferente do joystick.
-2. **Modos:** 2 jogadores apenas, ou também 1 jogador contra IA no Marco 0?
-3. **Ponto de vitória / regras:** pontuação até quanto? Aceleração da bola?
+Nenhuma em aberto no momento.
