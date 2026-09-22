@@ -12,8 +12,10 @@
 ;     qualquer velocidade, sem exigir paridade combinada entre posicao/
 ;     velocidade/limites (lição da fragilidade anterior, ver constantes).
 ;   - Saque com direcao E angulo aleatorios (LFSR de 8 bits, AdvanceRandom):
-;     3 perfis de angulo (raso/medio/ingreme) x 4 quadrantes de direcao =
-;     ate 12 trajetorias de saque possiveis, nao sempre a mesma como antes.
+;     3 perfis de angulo (raso/medio/ingreme, via BallSkipMode fazendo um
+;     eixo pular frames impares — NAO via magnitude de DX/DY diferente,
+;     que mudava a velocidade diagonal total entre perfis, bug corrigido)
+;     x 4 quadrantes de direcao = ate 12 trajetorias de saque possiveis.
 ;     Rebatida na raquete ganha "efeito": se a raquete estava em movimento
 ;     no instante da colisao, o angulo vertical da bola fecha ou abre na
 ;     mesma direcao (P0Dir/P1Dir).
@@ -121,15 +123,23 @@ BALL_RALLY_SPEED = 2
 ; (ver ResetBall) — pedido do usuario, saque nao pode ser sempre pro mesmo
 ; lado.
 
-; Angulo de saque tambem aleatorio (nao so a direcao/quadrante): 3 perfis
-; de |DX|/|DY|, escolhidos por 2 bits do LFSR, combinados com o sinal
-; (outros 2 bits) pra dar ate 12 trajetorias de saque diferentes.
-SERVE_SHALLOW_DX = 2             ; raso (~27 graus)
-SERVE_SHALLOW_DY = 1
-SERVE_MEDIUM_DX  = 1             ; 45 graus (era o unico angulo antes)
-SERVE_MEDIUM_DY  = 1
-SERVE_STEEP_DX   = 1             ; ingreme (~63 graus)
-SERVE_STEEP_DY   = 2
+; Angulo de saque tambem aleatorio (nao so a direcao/quadrante). Tentativa
+; anterior variava a MAGNITUDE de DX/DY por eixo (ex.: |DX|=2,|DY|=1 pro
+; angulo raso) — mas isso muda a velocidade diagonal total (raso/ingreme
+; ficavam ~58% mais rapidos que o angulo medio), o que o usuario reportou
+; como "velocidade do saque aleatoria" (bug real, nao intencional).
+;
+; Corrigido: em vez de magnitude, varia a FREQUENCIA de cada eixo. BallDX e
+; BallDY sempre tem magnitude BALL_SERVE_SPEED (nunca muda); o angulo vem
+; de BallSkipMode fazendo um dos dois eixos so se mover em frames
+; alternados (ver bloco de movimento no MainLoop). Isso mantem a
+; velocidade de cada eixo fixa; a velocidade diagonal total varia bem
+; menos entre os perfis (raso/ingreme ficam ~21% mais lentos que o medio,
+; em vez dos ~58% mais rapidos de antes — inverteu e reduziu bastante a
+; diferenca, mais aceitavel visualmente).
+BALL_SKIP_NONE   = 0             ; 45 graus: os 2 eixos se movem todo frame
+BALL_SKIP_Y      = 1             ; raso (~27 graus): Y pula frames impares
+BALL_SKIP_X      = 2             ; ingreme (~63 graus): X pula frames impares
 
 ; "efeito" da raquete na rebatida: se a raquete estava em movimento no
 ; instante da colisao, BallDY ganha um nudge de +-BALL_SPIN na mesma
@@ -178,8 +188,9 @@ P1YEnd  ds 1                    ; P1Y + PADDLE_HT (pre-calculado)
 BallX   ds 1                    ; coluna da bola (escala 0-159, mesma do SetHorizPos)
 BallY   ds 1                    ; topo da bola
 BallYEnd ds 1                   ; BallY + BALL_HT (pre-calculado)
-BallDX  ds 1                    ; velocidade horizontal: +-BALL_SPEED
-BallDY  ds 1                    ; velocidade vertical: +-BALL_SPEED
+BallDX  ds 1                    ; velocidade horizontal: +-BALL_SERVE_SPEED
+                                 ; ou +-BALL_RALLY_SPEED (+-BALL_SPIN em BallDY)
+BallDY  ds 1                    ; velocidade vertical, mesma escala de BallDX
 SoundTimer ds 1                 ; frames restantes do bip de colisao (0 = silencio)
 ScoreP0 ds 1                    ; pontos do jogador da esquerda (sem exibicao
 ScoreP1 ds 1                    ; visual ainda — ver nota no Incremento 5)
@@ -188,8 +199,11 @@ RandomSeed ds 1                 ; estado do LFSR pseudo-aleatorio (nunca pode
 P0Dir   ds 1                    ; direcao da raquete esquerda NESTE frame:
 P1Dir   ds 1                    ; -1 (subindo), 0 (parada) ou +1 (descendo).
                                  ; Usado pra dar "efeito" na bola ao rebater.
-ServeMagDX ds 1                 ; magnitude (sem sinal) do angulo de saque
-ServeMagDY ds 1                 ; sorteado em ResetBall — temporarios
+BallSkipMode ds 1                ; BALL_SKIP_NONE/Y/X — qual eixo (se algum)
+                                 ; pula frames impares, pra dar angulo de
+                                 ; saque sem mudar a velocidade por eixo.
+                                 ; Volta a BALL_SKIP_NONE na 1a colisao com
+                                 ; raquete (rally usa so o efeito de spin).
 
         SEG code
         ORG $F000
@@ -369,10 +383,22 @@ NoTopBounce
         bmi NoBottomBounce       ; ja indo pra cima (<0), nada a fazer
         jsr NegateBallDY
 NoBottomBounce
+        ; aplica o movimento vertical, a menos que o perfil de angulo seja
+        ; BALL_SKIP_Y e este seja um frame impar (angulo de saque raso —
+        ; ver nota em BALL_SKIP_NONE/Y/X nas constantes)
+        lda BallSkipMode
+        cmp #BALL_SKIP_Y
+        bne DoMoveY
+        lda Frame
+        and #1
+        bne SkipMoveY
+DoMoveY
         lda BallY
         clc
         adc BallDY
         sta BallY
+SkipMoveY
+        lda BallY
         clc
         adc #BALL_HT
         sta BallYEnd
@@ -398,6 +424,15 @@ NoScoreP1
         jsr ResetBall
         jmp BallMoveDone
 NoScoreP0
+        ; mesma logica de skip do bloco vertical, agora pro eixo X
+        ; (BALL_SKIP_X = angulo de saque ingreme)
+        lda BallSkipMode
+        cmp #BALL_SKIP_X
+        bne DoMoveX
+        lda Frame
+        and #1
+        bne BallMoveDone         ; impar -> pula X, pula reto pro fim do bloco
+DoMoveX
         lda BallX
         clc
         adc BallDX
@@ -589,6 +624,8 @@ SkipBBall
         beq NoHitP0
         lda #BALL_RALLY_SPEED    ; bateu na raquete esquerda -> bola vai pra direita
         sta BallDX
+        lda #BALL_SKIP_NONE      ; encerra o angulo de saque (skip), so o
+        sta BallSkipMode         ; efeito de spin (abaixo) vale no rally
         jsr SetBallDYToRallySpeed
         lda P0Dir
         beq NoSpinP0
@@ -603,6 +640,8 @@ NoHitP0
         beq NoHitP1
         lda #-BALL_RALLY_SPEED   ; bateu na raquete direita -> bola vai pra esquerda
         sta BallDX
+        lda #BALL_SKIP_NONE
+        sta BallSkipMode
         jsr SetBallDYToRallySpeed
         lda P1Dir
         beq NoSpinP1
@@ -740,10 +779,13 @@ NoRandomTap
 ; saque aleatorios (bits de RandomSeed), apos um ponto marcado ou no Reset.
 ; Nao mexe em P0/P1 (raquetes ficam onde estavam).
 ;
-; Bits 2-3 de RandomSeed escolhem o perfil de angulo (raso/medio/ingreme,
-; ver SERVE_SHALLOW/MEDIUM/STEEP_DX/DY nas constantes); bits 0-1 escolhem o
-; sinal de cada eixo — ate 3 perfis x 4 quadrantes = 12 trajetorias de
-; saque possiveis.
+; BallDX/BallDY tem magnitude FIXA (BALL_SERVE_SPEED) nos dois eixos — o
+; angulo vem de BallSkipMode (bits 2-3 de RandomSeed), que faz um dos eixos
+; pular frames impares (ver bloco de movimento no MainLoop), nao de
+; magnitudes diferentes (ver nota nas constantes: isso mudava a velocidade
+; diagonal total entre os perfis, bug reportado pelo usuario). Bits 0-1
+; escolhem o sinal (quadrante) de cada eixo — 3 perfis x 4 quadrantes = 12
+; trajetorias de saque possiveis.
 ; ---------------------------------------------------------------------------
 ResetBall
         lda #BALL_X_INIT
@@ -754,61 +796,45 @@ ResetBall
         adc #BALL_HT
         sta BallYEnd
 
-        ; escolhe o perfil de angulo (magnitude de DX/DY) usando os bits
-        ; 2-3 de RandomSeed (valor 0-3; 0 e 3 caem no mesmo perfil "raso",
+        ; escolhe o perfil de angulo (BallSkipMode) usando os bits 2-3 de
+        ; RandomSeed (valor 0-3; 0 e 3 caem no mesmo perfil BALL_SKIP_NONE,
         ; leve vies aceitavel pra manter a logica simples)
         lda RandomSeed
         lsr
         lsr
         and #%00000011
         cmp #1
-        beq ServeAngleMedium
+        beq ServeSkipY
         cmp #2
-        beq ServeAngleSteep
-        lda #SERVE_SHALLOW_DX    ; 0 ou 3 -> raso
-        sta ServeMagDX
-        lda #SERVE_SHALLOW_DY
-        sta ServeMagDY
-        jmp ServeAngleDone
-ServeAngleMedium
-        lda #SERVE_MEDIUM_DX
-        sta ServeMagDX
-        lda #SERVE_MEDIUM_DY
-        sta ServeMagDY
-        jmp ServeAngleDone
-ServeAngleSteep
-        lda #SERVE_STEEP_DX
-        sta ServeMagDX
-        lda #SERVE_STEEP_DY
-        sta ServeMagDY
-ServeAngleDone
+        beq ServeSkipX
+        lda #BALL_SKIP_NONE      ; 0 ou 3 -> 45 graus
+        jmp ServeSkipDone
+ServeSkipY
+        lda #BALL_SKIP_Y
+        jmp ServeSkipDone
+ServeSkipX
+        lda #BALL_SKIP_X
+ServeSkipDone
+        sta BallSkipMode
 
-        ; bit 0 de RandomSeed decide o sinal de BallDX
+        ; bit 0 de RandomSeed decide o sinal de BallDX (magnitude sempre
+        ; BALL_SERVE_SPEED)
         lda RandomSeed
         lsr
+        lda #-BALL_SERVE_SPEED
         bcc RandDXStore
-        lda #0
-        sec
-        sbc ServeMagDX
-        sta BallDX
-        jmp RandDXDone
+        lda #BALL_SERVE_SPEED
 RandDXStore
-        lda ServeMagDX
         sta BallDX
-RandDXDone
 
         ; bit 1 de RandomSeed decide o sinal de BallDY
         lda RandomSeed
         lsr
         lsr
+        lda #-BALL_SERVE_SPEED
         bcc RandDYStore
-        lda #0
-        sec
-        sbc ServeMagDY
-        sta BallDY
-        rts
+        lda #BALL_SERVE_SPEED
 RandDYStore
-        lda ServeMagDY
         sta BallDY
         rts
 
