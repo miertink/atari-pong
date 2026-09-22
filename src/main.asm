@@ -119,6 +119,16 @@ BALL_RALLY_SPEED = 2
 ; (ver ResetBall) — pedido do usuario, saque nao pode ser sempre pro mesmo
 ; lado.
 
+; Angulo de saque tambem aleatorio (nao so a direcao/quadrante): 3 perfis
+; de |DX|/|DY|, escolhidos por 2 bits do LFSR, combinados com o sinal
+; (outros 2 bits) pra dar ate 12 trajetorias de saque diferentes.
+SERVE_SHALLOW_DX = 2             ; raso (~27 graus)
+SERVE_SHALLOW_DY = 1
+SERVE_MEDIUM_DX  = 1             ; 45 graus (era o unico angulo antes)
+SERVE_MEDIUM_DY  = 1
+SERVE_STEEP_DX   = 1             ; ingreme (~63 graus)
+SERVE_STEEP_DY   = 2
+
 ; "efeito" da raquete na rebatida: se a raquete estava em movimento no
 ; instante da colisao, BallDY ganha um nudge de +-BALL_SPIN na mesma
 ; direcao do movimento da raquete (steering classico de Pong). Combinado
@@ -176,6 +186,8 @@ RandomSeed ds 1                 ; estado do LFSR pseudo-aleatorio (nunca pode
 P0Dir   ds 1                    ; direcao da raquete esquerda NESTE frame:
 P1Dir   ds 1                    ; -1 (subindo), 0 (parada) ou +1 (descendo).
                                  ; Usado pra dar "efeito" na bola ao rebater.
+ServeMagDX ds 1                 ; magnitude (sem sinal) do angulo de saque
+ServeMagDY ds 1                 ; sorteado em ResetBall — temporarios
 
         SEG code
         ORG $F000
@@ -722,9 +734,14 @@ NoRandomTap
         rts
 
 ; ---------------------------------------------------------------------------
-; ResetBall - devolve a bola ao centro da tela, com velocidade inicial de
-; saque (BALL_SERVE_SPEED) e DIRECAO ALEATORIA (bits de RandomSeed), apos um
-; ponto marcado ou no Reset. Nao mexe em P0/P1 (raquetes ficam onde estavam).
+; ResetBall - devolve a bola ao centro da tela, com ANGULO E DIRECAO de
+; saque aleatorios (bits de RandomSeed), apos um ponto marcado ou no Reset.
+; Nao mexe em P0/P1 (raquetes ficam onde estavam).
+;
+; Bits 2-3 de RandomSeed escolhem o perfil de angulo (raso/medio/ingreme,
+; ver SERVE_SHALLOW/MEDIUM/STEEP_DX/DY nas constantes); bits 0-1 escolhem o
+; sinal de cada eixo — ate 3 perfis x 4 quadrantes = 12 trajetorias de
+; saque possiveis.
 ; ---------------------------------------------------------------------------
 ResetBall
         lda #BALL_X_INIT
@@ -735,23 +752,61 @@ ResetBall
         adc #BALL_HT
         sta BallYEnd
 
+        ; escolhe o perfil de angulo (magnitude de DX/DY) usando os bits
+        ; 2-3 de RandomSeed (valor 0-3; 0 e 3 caem no mesmo perfil "raso",
+        ; leve vies aceitavel pra manter a logica simples)
+        lda RandomSeed
+        lsr
+        lsr
+        and #%00000011
+        cmp #1
+        beq ServeAngleMedium
+        cmp #2
+        beq ServeAngleSteep
+        lda #SERVE_SHALLOW_DX    ; 0 ou 3 -> raso
+        sta ServeMagDX
+        lda #SERVE_SHALLOW_DY
+        sta ServeMagDY
+        jmp ServeAngleDone
+ServeAngleMedium
+        lda #SERVE_MEDIUM_DX
+        sta ServeMagDX
+        lda #SERVE_MEDIUM_DY
+        sta ServeMagDY
+        jmp ServeAngleDone
+ServeAngleSteep
+        lda #SERVE_STEEP_DX
+        sta ServeMagDX
+        lda #SERVE_STEEP_DY
+        sta ServeMagDY
+ServeAngleDone
+
         ; bit 0 de RandomSeed decide o sinal de BallDX
         lda RandomSeed
         lsr
-        lda #-BALL_SERVE_SPEED
         bcc RandDXStore
-        lda #BALL_SERVE_SPEED
-RandDXStore
+        lda #0
+        sec
+        sbc ServeMagDX
         sta BallDX
+        jmp RandDXDone
+RandDXStore
+        lda ServeMagDX
+        sta BallDX
+RandDXDone
 
         ; bit 1 de RandomSeed decide o sinal de BallDY
         lda RandomSeed
         lsr
         lsr
-        lda #-BALL_SERVE_SPEED
         bcc RandDYStore
-        lda #BALL_SERVE_SPEED
+        lda #0
+        sec
+        sbc ServeMagDY
+        sta BallDY
+        rts
 RandDYStore
+        lda ServeMagDY
         sta BallDY
         rts
 
