@@ -1,42 +1,38 @@
 ; Pong para Atari 2600 (NTSC)
-; Marco 0, Incremento 2 (correcao): joystick move as raquetes (P0/P1).
-; Base: Incremento 1 (raquetes e bola estaticas, validado no Stella em
-; 2026-09-22). Correcoes de 2026-09-22 apos feedback:
 ;
-; 1) "bola desloca sutilmente ao mover a raquete esquerda": nao ha, no
-;    codigo, nenhum caminho logico entre P0Y/P0YEnd e a bola (RAM sem
-;    sobreposicao, indices de SetHorizPos conferidos no .sym). O
-;    reposicionamento horizontal (SetHorizPos + HMOVE) rodava todo frame
-;    mesmo sem nada mudar de posicao horizontal ainda — reforcar o HMOVE a
-;    toa expoe ao efeito "HMOVE comb" (artefato documentado da TIA: o
-;    strobe pode deslocar 1 pixel um objeto mesmo com ajuste zero). Agora
-;    o posicionamento horizontal roda uma unica vez, no Reset. Se o efeito
-;    persistir mesmo assim, e mais provavel ilusao de otica (movimento
-;    induzido por um objeto proximo se movendo) do que bug de posicao.
-; 2) "pedaco da raquete direita aparece no topo quando encostada embaixo":
-;    GRP0/GRP1/ENABL nunca eram zerados fora do kernel visivel, entao o
-;    ultimo valor da linha 191 sobrevivia por todo o VSYNC/VBLANK do frame
-;    seguinte. Agora sao zerados explicitamente ao fim da area visivel.
-; 3) "bola some quando as duas raquetes vao para a metade superior da tela":
-;    revisado o codigo, BallY e P0Y/P1Y sao variaveis de RAM independentes
-;    ($85 vs $81/$83), sem ponto de contato — nao ha caminho logico que
-;    ligue a posicao das raquetes ao desenho da bola. Suspeita mais provavel:
-;    a bola tinha so 1 scanline de altura, objeto fino demais para renderizar
-;    de forma confiavel (problema pratico conhecido em kernels Atari 2600,
-;    independente de bug de posicao). Aumentada para 2 scanlines.
+; Estado atual (2026-09-22): Marco 0, Incremento 3.
+;   - P0/P1 (raquetes): joystick move na vertical; posicao horizontal fixa,
+;     definida uma unica vez no Reset.
+;   - BL (bola): se move e quica no topo/base (regra definitiva). Tambem
+;     quica nas laterais por enquanto — placeholder ate colisao com raquete
+;     e pontuacao (Incrementos 4/5), que vao substituir o quique lateral.
 ;
-; Paredes topo/base ficam de fora desta passada de proposito: o kernel de
-; 192 linhas tem orcamento de 76 ciclos de CPU por scanline. Com raquetes +
-; bola o pior caso fica ~61 ciclos (folga de ~15). Empilhar tambem a logica
-; de parede (COLUBK por linha) passaria de 76 no calculo a mao — melhor
-; validar o nucleo primeiro e reintroduzir parede num incremento a parte,
-; com folga para conferir.
+; Historico de bugs corrigidos (Incremento 2, 2026-09-22):
+;   1) Deslocamento subito de ~1px em objetos ao mexer no joystick: causa
+;      mais provavel era reforcar HMOVE todo frame sem necessidade (efeito
+;      "HMOVE comb" da TIA). Resolvido ao reposicionar P0/P1 uma unica vez
+;      no Reset em vez de todo frame. Residual de ~1px aceito pelo usuario
+;      como particularidade do emulador, sem impacto pratico.
+;   2) Fragmento de raquete "vazando" para o topo da tela quando encostada
+;      no limite inferior: GRP0/GRP1/ENABL nao eram zerados fora do kernel
+;      visivel, entao o ultimo valor da linha 191 sobrevivia pelo
+;      VSYNC/VBLANK do frame seguinte. Corrigido zerando os tres ao sair da
+;      area visivel.
+;   3) Bola sumindo com as raquetes na metade superior da tela: causa era a
+;      bola ter so 1 scanline de altura (objeto fino demais para renderizar
+;      de forma confiavel). Corrigido aumentando para 2 scanlines.
 ;
-; Leitura de joystick: feita durante o VBLANK (nao critico ciclo a ciclo como
-; o kernel visivel), mas cada bloco (P0, P1) fica em sua propria linha com
-; WSYNC proprio — sem isso, ~40 ciclos de logica por raquete podem passar de
-; 76 ciclos e "vazar" para a linha seguinte, desalinhando as 37 linhas do
-; VBLANK.
+; Paredes topo/base (visuais) ficam de fora desta passada de proposito: o
+; kernel de 192 linhas tem orcamento de 76 ciclos de CPU por scanline, e ja
+; esta perto do limite so com raquetes + bola. Reintroduzir num incremento a
+; parte, com folga para conferir.
+;
+; Timing do VBLANK: leitura de joystick e movimento da bola nao sao criticos
+; ciclo a ciclo como o kernel visivel, mas cada bloco logico (P0, P1,
+; quique-Y da bola, quique-X da bola, reposicionamento da bola) fica em sua
+; propria linha com WSYNC proprio — sem isso, o bloco combinado passaria
+; perto ou acima de 76 ciclos e "vazaria" para a linha seguinte,
+; desalinhando as 37 linhas do VBLANK.
 
         processor 6502
         include "vcs.h"
@@ -50,6 +46,15 @@ PADDLE_Y_MAX   = 192-PADDLE_HT  ; maior valor valido de P0Y/P1Y (base = linha 19
 BALL_HT        = 2              ; altura da bola, em scanlines
 BALL_SIZE      = %00010000      ; CTRLPF: bola com 2 color clocks de largura
 COLOR_WHITE    = $0E
+
+; limites de quique da bola (0-159 horizontal, mesma escala usada por
+; SetHorizPos; verticais em linhas de scanline, 0-191)
+BALL_X_MIN     = 1
+BALL_X_MAX     = 158
+BALL_Y_MIN     = 0
+BALL_Y_MAX     = 192-BALL_HT
+BALL_DX_INIT   = 1
+BALL_DY_INIT   = 1
 
 P0_X           = 4              ; posicao horizontal fixa da raquete esquerda
                                  ; (ajustado: 3x a largura da raquete a menos
@@ -67,8 +72,11 @@ P0Y     ds 1                    ; topo da raquete esquerda
 P0YEnd  ds 1                    ; P0Y + PADDLE_HT (pre-calculado)
 P1Y     ds 1                    ; topo da raquete direita
 P1YEnd  ds 1                    ; P1Y + PADDLE_HT (pre-calculado)
+BallX   ds 1                    ; coluna da bola (escala 0-159, mesma do SetHorizPos)
 BallY   ds 1                    ; topo da bola
 BallYEnd ds 1                   ; BallY + BALL_HT (pre-calculado)
+BallDX  ds 1                    ; velocidade horizontal: $01 ou $FF (-1)
+BallDY  ds 1                    ; velocidade vertical: $01 ou $FF (-1)
 
         SEG code
         ORG $F000
@@ -97,18 +105,22 @@ Reset
         adc #PADDLE_HT
         sta P1YEnd
 
+        lda #BALL_X_INIT
+        sta BallX
         lda #BALL_Y_INIT
         sta BallY
         clc
         adc #BALL_HT
         sta BallYEnd
+        lda #BALL_DX_INIT
+        sta BallDX
+        lda #BALL_DY_INIT
+        sta BallDY
 
-        ; Posicionamento horizontal: feito uma unica vez aqui. Neste
-        ; incremento nada muda de posicao horizontal (raquetes so se movem
-        ; na vertical, bola ainda parada); repetir isso todo frame so
-        ; reforcaria o HMOVE sem necessidade. Quando a bola comecar a se
-        ; mover (Incremento 3), o reposicionamento dela volta para o
-        ; MainLoop (P0/P1 continuam fixos na horizontal).
+        ; Posicionamento horizontal inicial (uma vez). P0/P1 nunca mais se
+        ; reposicionam na horizontal (so se movem na vertical). A bola e
+        ; reposicionada de novo a cada frame no MainLoop, ja que agora ela
+        ; se move (ver bloco "move a bola" abaixo).
         lda #P0_X
         ldx #0
         jsr SetHorizPos          ; P0
@@ -132,7 +144,8 @@ MainLoop
         lda #0
         sta VSYNC
 
-        ; --- VBLANK: 37 linhas (1 P0 + 1 P1 + 35 de espera) ---
+        ; --- VBLANK: 37 linhas (1 P0 + 1 P1 + 1 bounce-Y + 1 bounce-X +
+        ; 1 SetHorizPos bola + 1 HMOVE/HMCLR + 31 de espera) ---
         lda #2
         sta VBLANK
 
@@ -196,7 +209,64 @@ SkipP1Down
         adc #PADDLE_HT
         sta P1YEnd
 
-        ldx #35
+        ; --- move a bola: quique vertical (topo/base) ---
+        sta WSYNC
+        lda BallY
+        cmp #BALL_Y_MIN
+        bne NoTopBounce
+        lda BallDY
+        bpl NoTopBounce          ; ja indo pra baixo (>=0), nada a fazer
+        lda #1
+        sta BallDY
+NoTopBounce
+        lda BallY
+        cmp #BALL_Y_MAX
+        bne NoBottomBounce
+        lda BallDY
+        bmi NoBottomBounce       ; ja indo pra cima (<0), nada a fazer
+        lda #$FF
+        sta BallDY
+NoBottomBounce
+        lda BallY
+        clc
+        adc BallDY
+        sta BallY
+        clc
+        adc #BALL_HT
+        sta BallYEnd
+
+        ; --- move a bola: quique horizontal (placeholder ate paddle/pontuacao) ---
+        sta WSYNC
+        lda BallX
+        cmp #BALL_X_MIN
+        bne NoLeftBounce
+        lda BallDX
+        bpl NoLeftBounce         ; ja indo pra direita (>=0), nada a fazer
+        lda #1
+        sta BallDX
+NoLeftBounce
+        lda BallX
+        cmp #BALL_X_MAX
+        bne NoRightBounce
+        lda BallDX
+        bmi NoRightBounce        ; ja indo pra esquerda (<0), nada a fazer
+        lda #$FF
+        sta BallDX
+NoRightBounce
+        lda BallX
+        clc
+        adc BallDX
+        sta BallX
+
+        ; reposiciona a bola na horizontal (unico objeto que ainda se move
+        ; na horizontal neste incremento)
+        ldx #4
+        jsr SetHorizPos
+        sta WSYNC
+        sta HMOVE
+        sta HMCLR
+
+        ldx #31
 VBlankLoop
         sta WSYNC
         dex
