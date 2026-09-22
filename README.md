@@ -209,11 +209,23 @@ Consulta rápida para não sair do repositório.
         posicionadas (sem movimento, sem paredes ainda — ver nota de
         orçamento de ciclos no `main.asm`). Validado no Stella em 2026-09-22;
         ajuste cosmético aplicado (raquete esquerda `P0_X` 16→4).
-  - [ ] Incremento 2 — joystick move as raquetes.
-  - [ ] Incremento 3 — bola se move e quica nas bordas (topo/base).
+  - [x] **Incremento 2 — joystick move as raquetes:** validado em 2026-09-22.
+        Três bugs reportados e corrigidos: (1) objeto deslocando ~1px ao
+        mexer no joystick — causa provável era HMOVE re-estrobado todo frame
+        sem necessidade; resíduo de ~1px aceito como particularidade do
+        emulador; (2) fragmento de raquete vazando para o topo da tela —
+        `GRP0/GRP1/ENABL` não eram zerados fora do kernel visível; (3) bola
+        sumindo com raquetes no topo — bola tinha só 1 scanline de altura,
+        aumentada para 2.
+  - [x] **Incremento 3 — bola se move e quica nas bordas:** implementado em
+        2026-09-22. Quique real no topo/base; quique nas laterais por
+        enquanto é placeholder (substituído pela colisão com raquete e
+        detecção de ponto nos incrementos 4/5). Sem aceleração, conforme
+        regra definida.
   - [ ] Incremento 4 — colisão bola↔raquete (hardware, `CXP0FB`/`CXP1FB`) + bip.
   - [ ] Incremento 5 — paredes topo/base (reintroduzir, com orçamento de
-        ciclos ok) e detecção de ponto (bola passa da raquete).
+        ciclos ok) e detecção de ponto (bola passa da raquete, substituindo
+        o quique lateral provisório do Incremento 3).
 - [ ] Placar em tela (dígitos), IA como oponente, som além do bip de colisão.
 
 ### Candidatos por complexidade
