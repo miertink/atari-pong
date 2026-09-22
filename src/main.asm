@@ -6,13 +6,17 @@
 ;     fixed, set once in Reset.
 ;   - BL (ball): moves, bounces off the walls, collides with paddles via
 ;     hardware, and awards a point when it passes a paddle uncontested.
-;     Speed has two phases: BALL_SERVE_SPEED at serve, a single step up to
-;     BALL_RALLY_SPEED on the first paddle hit (not continuous
-;     acceleration — constant after that). Serve direction and angle are
+;     Speed has two phases: BALL_SERVE_SPEED at serve, a step up to rally
+;     speed on the first paddle hit. Rally speed then creeps up 10% every
+;     HITS_PER_LEVEL hits (LevelSpeedTable), capped at MAX_HIT_LEVEL —
+;     with PADDLE_SPEED only 1 above the starting rally speed, there's no
+;     integer room for more than one real step before the ball would
+;     reach the paddle's own speed, so growth stops there (see the
+;     constants note near HITS_PER_LEVEL). Serve direction and angle are
 ;     randomized (8-bit LFSR); a moving paddle at the moment of contact
 ;     nudges the ball's vertical angle (English/spin).
-;   - Score (ScoreP0/ScoreP1) tracked in RAM only, no on-screen digits yet
-;     (separate kernel work for after Marco 0 — see README).
+;   - Score (ScoreP0/ScoreP1) shown on screen (DigitFont), reset to 0/0 on
+;     a match win (SCORE_TO_WIN) — which also resets the speed progression.
 ;
 ; Engineering notes worth keeping in mind when touching this code:
 ;
@@ -72,10 +76,20 @@ BALL_Y_MIN     = SCORE_HT+WALL_HT     ; bounces off the wall's inner face,
 BALL_Y_MAX     = 192-WALL_HT-BALL_HT  ; not the screen's absolute edge
 
 ; Ball speed: slow at serve, one step up to rally speed on the first
-; paddle hit, then constant (no continuous acceleration during a rally).
-; Serve(1) < Rally(2) < Paddle(3) — ball always stays slower than the paddle.
+; paddle hit. Serve(1) < Rally(2) < Paddle(3).
 BALL_SERVE_SPEED = 1
 BALL_RALLY_SPEED = 2
+
+; Rally speed then creeps up: +10% every HITS_PER_LEVEL paddle hits (across
+; the whole match, not reset per point — only on a match win). With
+; PADDLE_SPEED=3 and rally speed starting at 2, there is NO integer value
+; strictly between them — compounding 2.0 -> 2.2 -> 2.42 -> 2.66 (rounds
+; to 3) reaches the paddle's own speed after 3 levels and has nowhere
+; left to go, so growth stops there (matches, never exceeds, the paddle).
+; LevelSpeedTable holds these hand-computed, pre-rounded values — no
+; runtime multiply/divide needed for something this small.
+HITS_PER_LEVEL = 10
+MAX_HIT_LEVEL  = 3              ; LevelSpeedTable has MAX_HIT_LEVEL+1 entries
 
 ; Serve angle: 3 profiles, picked by FREQUENCY (which axis, if any, skips
 ; odd frames) rather than by step magnitude — magnitude-based profiles
@@ -85,8 +99,9 @@ BALL_SKIP_Y    = 1               ; shallow (~27 deg): Y skips odd frames
 BALL_SKIP_X    = 2               ; steep (~63 deg): X skips odd frames
 
 ; Paddle English: a moving paddle at the moment of contact nudges BallDY
-; by +-BALL_SPIN in its own direction. Combined with BALL_RALLY_SPEED(2),
-; final BallDY magnitude lands in [1,3] — never zero, never extreme.
+; by +-BALL_SPIN in its own direction. Combined with the current rally
+; speed (2-3, see LevelSpeedTable), final BallDY magnitude lands in
+; [1,4] at most — never zero, never wildly out of proportion.
 BALL_SPIN      = 1
 
 ; Ball<->paddle collision (hardware CXP0FB/CXP1FB, bit 6 = ball collision;
@@ -175,6 +190,9 @@ BallSkipMode ds 1                ; BALL_SKIP_NONE/Y/X — which axis (if any)
                                  ; effect).
 P0FontPtr ds 2                  ; pointer into DigitFont for this frame's
 P1FontPtr ds 2                  ; score row (computed once, read per line)
+HitLevel ds 1                   ; 0..MAX_HIT_LEVEL — indexes LevelSpeedTable
+HitsSinceLevelUp ds 1           ; 0..HITS_PER_LEVEL-1, counts toward the
+                                 ; next level. Both reset to 0 on a match win.
 
         SEG code
         ORG $F000
@@ -390,6 +408,8 @@ SkipMoveY
         lda #0                   ; match point reached -> new game
         sta ScoreP0
         sta ScoreP1
+        sta HitLevel             ; speed progression also resets with the match
+        sta HitsSinceLevelUp
 SkipWinP1
         jsr StartScoreSound
         jsr ResetBall
@@ -405,6 +425,8 @@ NoScoreP1
         lda #0
         sta ScoreP0
         sta ScoreP1
+        sta HitLevel
+        sta HitsSinceLevelUp
 SkipWinP0
         jsr StartScoreSound
         jsr ResetBall
@@ -661,20 +683,22 @@ SkipBBall
         ; frame that just ran; reading now picks up the full result.
         ; CXCLR at the end clears the latches for next frame (they're
         ; sticky, they don't clear themselves).
-        ; On a hit, the ball goes to (or stays at) rally speed
-        ; (BALL_RALLY_SPEED) — on the serve's first hit this "accelerates"
-        ; the ball once (BALL_SERVE_SPEED -> BALL_RALLY_SPEED); later hits
-        ; just reaffirm the same value (no continuous acceleration).
-        ; BallDY's magnitude is also set to BALL_RALLY_SPEED, keeping its
-        ; sign (vertical direction doesn't change on a paddle hit) — then
-        ; gets the paddle's English: if P0/P1Dir shows the paddle was
-        ; moving at the moment of contact, that direction is added to
-        ; BallDY, closing or opening the angle (never reaching 0 — see the
-        ; BALL_SPIN constant).
+        ; On a hit, the ball goes to (or stays at) the current rally speed
+        ; (GetRallySpeed/LevelSpeedTable — starts at BALL_RALLY_SPEED, then
+        ; creeps up every HITS_PER_LEVEL hits, see the constants note) — on
+        ; the serve's first hit this "accelerates" the ball once
+        ; (BALL_SERVE_SPEED -> rally speed); later hits just reaffirm the
+        ; current value. BallDY's magnitude is also set to the same rally
+        ; speed, keeping its sign (vertical direction doesn't change on a
+        ; paddle hit) — then gets the paddle's English: if P0/P1Dir shows
+        ; the paddle was moving at the moment of contact, that direction is
+        ; added to BallDY, closing or opening the angle (never reaching 0
+        ; — see the BALL_SPIN constant).
         lda CXP0FB
         and #COLLISION_BL
         beq NoHitP0
-        lda #BALL_RALLY_SPEED    ; hit the left paddle -> ball heads right
+        jsr AdvanceHitLevel
+        jsr GetRallySpeed        ; hit the left paddle -> ball heads right
         sta BallDX
         lda #BALL_SKIP_NONE      ; serve angle (skip mode) ends here; only
         sta BallSkipMode         ; the spin effect below applies in a rally
@@ -690,7 +714,12 @@ NoHitP0
         lda CXP1FB
         and #COLLISION_BL
         beq NoHitP1
-        lda #-BALL_RALLY_SPEED   ; hit the right paddle -> ball heads left
+        jsr AdvanceHitLevel
+        jsr GetRallySpeed        ; hit the right paddle -> ball heads left
+        sta BallDX
+        lda #0
+        sec
+        sbc BallDX               ; negate: BallDX = -GetRallySpeed
         sta BallDX
         lda #BALL_SKIP_NONE
         sta BallSkipMode
@@ -724,6 +753,20 @@ OverscanLoop
         bne OverscanLoop
 
         jmp MainLoop
+
+; ---------------------------------------------------------------------------
+; LevelSpeedTable - rally speed at each HitLevel (0..MAX_HIT_LEVEL), hand-
+; computed by compounding BALL_RALLY_SPEED(2) by 10% per level and rounding
+; to the nearest integer at each step (rounding the RUNNING value, not a
+; freshly-rounded one each time, so the fractional part isn't lost):
+;   L0: 2.000            -> 2
+;   L1: 2.000*1.1=2.200  -> 2
+;   L2: 2.200*1.1=2.420  -> 2
+;   L3: 2.420*1.1=2.662  -> 3  (= PADDLE_SPEED; capped here, see constants
+;                               note near HITS_PER_LEVEL for why)
+; ---------------------------------------------------------------------------
+LevelSpeedTable
+        .byte 2,2,2,3
 
 ; ---------------------------------------------------------------------------
 ; DigitFont - 10 digits (0-9) x FONT_ROWS(5) bytes, one byte per font row
@@ -817,19 +860,52 @@ NegateBallDY
         rts
 
 ; ---------------------------------------------------------------------------
-; SetBallDYToRallySpeed - sets BallDY's MAGNITUDE to BALL_RALLY_SPEED,
-; keeping its current sign (vertical direction doesn't change on a paddle
-; hit, only the speed "accelerates" to the rally value).
+; SetBallDYToRallySpeed - sets BallDY's MAGNITUDE to the current rally speed
+; (GetRallySpeed), keeping its current sign (vertical direction doesn't
+; change on a paddle hit, only the speed "accelerates" to the rally value).
 ; ---------------------------------------------------------------------------
 SetBallDYToRallySpeed
         lda BallDY
         bmi SetBallDYNegRally
-        lda #BALL_RALLY_SPEED
+        jsr GetRallySpeed
         sta BallDY
         rts
 SetBallDYNegRally
-        lda #-BALL_RALLY_SPEED
+        jsr GetRallySpeed
         sta BallDY
+        lda #0
+        sec
+        sbc BallDY
+        sta BallDY
+        rts
+
+; ---------------------------------------------------------------------------
+; GetRallySpeed - returns the current rally speed in A, looked up from
+; LevelSpeedTable by HitLevel. See the constants note (near HITS_PER_LEVEL)
+; for how the table was computed.
+; ---------------------------------------------------------------------------
+GetRallySpeed
+        ldx HitLevel
+        lda LevelSpeedTable,x
+        rts
+
+; ---------------------------------------------------------------------------
+; AdvanceHitLevel - counts one more paddle hit toward the next speed level;
+; every HITS_PER_LEVEL hits, bumps HitLevel by one, capped at MAX_HIT_LEVEL.
+; Called once per paddle hit (see the collision block in MainLoop).
+; ---------------------------------------------------------------------------
+AdvanceHitLevel
+        inc HitsSinceLevelUp
+        lda HitsSinceLevelUp
+        cmp #HITS_PER_LEVEL
+        bne AdvanceHitLevelDone
+        lda #0
+        sta HitsSinceLevelUp
+        lda HitLevel
+        cmp #MAX_HIT_LEVEL
+        bcs AdvanceHitLevelDone  ; already capped, stay there
+        inc HitLevel
+AdvanceHitLevelDone
         rts
 
 ; ---------------------------------------------------------------------------
