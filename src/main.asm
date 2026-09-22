@@ -264,10 +264,22 @@ NoRightBounce
 
         ; reposiciona a bola na horizontal (unico objeto que ainda se move
         ; na horizontal neste incremento). SetHorizPos faz seu proprio
-        ; WSYNC interno — necessario para o calculo de posicao (nao apenas
-        ; para timing geral, que o timer ja cobre).
+        ; WSYNC interno, necessario para o calculo de posicao.
+        ;
+        ; O "sta WSYNC" abaixo, antes do HMOVE, NAO e sobre orcamento de
+        ; ciclos (o timer ja cobre isso) — e um requisito de hardware:
+        ; HMOVE precisa ser estrobado logo no inicio de uma scanline (~24
+        ; ciclos de janela). Sem isso, como SetHorizPos pode levar ate ~80
+        ; ciclos para retornar (dependendo do X), o HMOVE ficava sendo
+        ; estrobado tarde demais na linha — e um HMOVE fora da janela pode
+        ; aplicar deslocamento incorreto/espurio a QUALQUER objeto, nao so
+        ; ao que acabou de ser reposicionado. Isso explicava tanto a
+        ; gangueira (piorada) quanto as raquetes se deslocando na horizontal
+        ; mesmo com HMP0/HMP1 zerados. Bug introduzido na refatoracao do
+        ; timer (removi este WSYNC achando que era so questao de orcamento).
         ldx #4
         jsr SetHorizPos
+        sta WSYNC
         sta HMOVE
         sta HMCLR
 
