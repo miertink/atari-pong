@@ -11,6 +11,10 @@
 ;     quique/ponto por desigualdade (nao igualdade exata) — robusta a
 ;     qualquer velocidade, sem exigir paridade combinada entre posicao/
 ;     velocidade/limites (lição da fragilidade anterior, ver constantes).
+;   - Saque com direcao aleatoria (LFSR de 8 bits, AdvanceRandom) — nao
+;     sempre pro mesmo lado como antes. Rebatida na raquete ganha "efeito":
+;     se a raquete estava em movimento no instante da colisao, o angulo
+;     vertical da bola fecha ou abre na mesma direcao (P0Dir/P1Dir).
 ;   - Placar (ScoreP0/ScoreP1) contado em RAM, sem exibicao visual ainda —
 ;     digitos na tela ficam para depois do Marco 0 (ja previsto no README).
 ;
@@ -111,8 +115,16 @@ BALL_Y_MAX     = 192-WALL_HT-BALL_HT  ; nao no limite absoluto da tela
 ; durante o rally (regra definida antes).
 BALL_SERVE_SPEED = 1
 BALL_RALLY_SPEED = 2
-BALL_DX_INIT   = BALL_SERVE_SPEED
-BALL_DY_INIT   = BALL_SERVE_SPEED
+; sem BALL_DX_INIT/BALL_DY_INIT fixos: a direcao do saque agora e aleatoria
+; (ver ResetBall) — pedido do usuario, saque nao pode ser sempre pro mesmo
+; lado.
+
+; "efeito" da raquete na rebatida: se a raquete estava em movimento no
+; instante da colisao, BallDY ganha um nudge de +-BALL_SPIN na mesma
+; direcao do movimento da raquete (steering classico de Pong). Combinado
+; com BALL_RALLY_SPEED(2), a magnitude final de BallDY fica em [1,3] —
+; nunca zero (nao trava num angulo horizontal), nunca absurdo.
+BALL_SPIN      = 1
 
 ; colisao bola<->raquete (hardware CXP0FB/CXP1FB, bit 6 = colisao com a bola;
 ; bit 7 seria colisao com playfield, nao usado aqui) + bip curto
@@ -159,6 +171,11 @@ BallDY  ds 1                    ; velocidade vertical: +-BALL_SPEED
 SoundTimer ds 1                 ; frames restantes do bip de colisao (0 = silencio)
 ScoreP0 ds 1                    ; pontos do jogador da esquerda (sem exibicao
 ScoreP1 ds 1                    ; visual ainda — ver nota no Incremento 5)
+RandomSeed ds 1                 ; estado do LFSR pseudo-aleatorio (nunca pode
+                                 ; ser 0 — ver AdvanceRandom)
+P0Dir   ds 1                    ; direcao da raquete esquerda NESTE frame:
+P1Dir   ds 1                    ; -1 (subindo), 0 (parada) ou +1 (descendo).
+                                 ; Usado pra dar "efeito" na bola ao rebater.
 
         SEG code
         ORG $F000
@@ -187,17 +204,14 @@ Reset
         adc #PADDLE_HT
         sta P1YEnd
 
-        lda #BALL_X_INIT
-        sta BallX
-        lda #BALL_Y_INIT
-        sta BallY
-        clc
-        adc #BALL_HT
-        sta BallYEnd
-        lda #BALL_DX_INIT
-        sta BallDX
-        lda #BALL_DY_INIT
-        sta BallDY
+        ; semente do gerador pseudo-aleatorio (nunca pode ser 0 — ver
+        ; AdvanceRandom). Valor exato nao importa muito: o "aleatorio" de
+        ; verdade vem do numero de frames ja passados quando cada saque
+        ; acontece (varia com o tempo de reacao do jogador), nao da semente.
+        lda #$2B
+        sta RandomSeed
+
+        jsr ResetBall            ; posiciona a bola no centro, direcao aleatoria
 
         ; Posicionamento horizontal inicial (uma vez). P0/P1 nunca mais se
         ; reposicionam na horizontal (so se movem na vertical). A bola e
@@ -244,7 +258,15 @@ MainLoop
         sta VBLANK
         TIMER_SETUP 37
 
+        jsr AdvanceRandom        ; 1x por frame, sempre — mantem o LFSR "girando"
+                                 ; independente do jogo, pra parecer aleatorio
+                                 ; no instante em que um saque de fato acontece
+
         ; --- move raquete P0 (joystick 0 = porta esquerda: bit4=Up, bit5=Down) ---
+        ; P0Dir registra a direcao deste frame (-1/0/+1) pra dar "efeito" na
+        ; bola se a colisao acontecer nesta mesma janela de tempo.
+        lda #0
+        sta P0Dir
         lda SWCHA
         and #%00010000
         bne SkipP0Up
@@ -255,6 +277,8 @@ MainLoop
         lda #0
 P0UpOk
         sta P0Y
+        lda #-1
+        sta P0Dir
 SkipP0Up
         lda SWCHA
         and #%00100000
@@ -267,6 +291,8 @@ SkipP0Up
         lda #PADDLE_Y_MAX
 P0DownOk
         sta P0Y
+        lda #1
+        sta P0Dir
 SkipP0Down
         lda P0Y
         clc
@@ -274,6 +300,8 @@ SkipP0Down
         sta P0YEnd
 
         ; --- move raquete P1 (joystick 1 = porta direita: bit0=Up, bit1=Down) ---
+        lda #0
+        sta P1Dir
         lda SWCHA
         and #%00000001
         bne SkipP1Up
@@ -284,6 +312,8 @@ SkipP0Down
         lda #0
 P1UpOk
         sta P1Y
+        lda #-1
+        sta P1Dir
 SkipP1Up
         lda SWCHA
         and #%00000010
@@ -296,6 +326,8 @@ SkipP1Up
         lda #PADDLE_Y_MAX
 P1DownOk
         sta P1Y
+        lda #1
+        sta P1Dir
 SkipP1Down
         lda P1Y
         clc
@@ -533,13 +565,23 @@ SkipBBall
         ; colisoes seguintes so reafirma o mesmo valor (nao ha aceleracao
         ; continua). BallDY tambem tem sua magnitude ajustada pra
         ; BALL_RALLY_SPEED, preservando o sinal (direcao vertical nao muda
-        ; por causa da colisao com raquete).
+        ; por causa da colisao com raquete) — e depois recebe o "efeito" da
+        ; raquete: se P0/P1Dir indicar que a raquete estava se movendo no
+        ; instante da colisao, soma essa direcao a BallDY, deixando o
+        ; angulo mais fechado ou mais aberto (nunca chega a 0, ver nota na
+        ; constante BALL_SPIN).
         lda CXP0FB
         and #COLLISION_BL
         beq NoHitP0
         lda #BALL_RALLY_SPEED    ; bateu na raquete esquerda -> bola vai pra direita
         sta BallDX
         jsr SetBallDYToRallySpeed
+        lda P0Dir
+        beq NoSpinP0
+        clc
+        adc BallDY
+        sta BallDY
+NoSpinP0
         jsr StartHitSound
 NoHitP0
         lda CXP1FB
@@ -548,6 +590,12 @@ NoHitP0
         lda #-BALL_RALLY_SPEED   ; bateu na raquete direita -> bola vai pra esquerda
         sta BallDX
         jsr SetBallDYToRallySpeed
+        lda P1Dir
+        beq NoSpinP1
+        clc
+        adc BallDY
+        sta BallDY
+NoSpinP1
         jsr StartHitSound
 NoHitP1
         sta CXCLR
@@ -657,9 +705,26 @@ SetBallDYNegRally
         rts
 
 ; ---------------------------------------------------------------------------
+; AdvanceRandom - avanca o LFSR de 8 bits em RandomSeed por 1 passo. Chamado
+; 1x por frame (ver VBLANK), independente do jogo — mantem o valor "girando"
+; o tempo todo pra que o instante exato de um saque (que depende do tempo de
+; reacao do jogador) amostre um valor imprevisivel. Nao ha RNG de hardware
+; no Atari 2600; este e o metodo padrao da comunidade (Galois LFSR de 8
+; bits, ciclo de ate 255 estados nao-zero).
+; ---------------------------------------------------------------------------
+AdvanceRandom
+        lda RandomSeed
+        lsr
+        bcc NoRandomTap
+        eor #$B4
+NoRandomTap
+        sta RandomSeed
+        rts
+
+; ---------------------------------------------------------------------------
 ; ResetBall - devolve a bola ao centro da tela, com velocidade inicial de
-; saque (BALL_SERVE_SPEED), apos um ponto marcado. Nao mexe em P0/P1
-; (raquetes ficam onde estavam).
+; saque (BALL_SERVE_SPEED) e DIRECAO ALEATORIA (bits de RandomSeed), apos um
+; ponto marcado ou no Reset. Nao mexe em P0/P1 (raquetes ficam onde estavam).
 ; ---------------------------------------------------------------------------
 ResetBall
         lda #BALL_X_INIT
@@ -669,9 +734,24 @@ ResetBall
         clc
         adc #BALL_HT
         sta BallYEnd
-        lda #BALL_DX_INIT
+
+        ; bit 0 de RandomSeed decide o sinal de BallDX
+        lda RandomSeed
+        lsr
+        lda #-BALL_SERVE_SPEED
+        bcc RandDXStore
+        lda #BALL_SERVE_SPEED
+RandDXStore
         sta BallDX
-        lda #BALL_DY_INIT
+
+        ; bit 1 de RandomSeed decide o sinal de BallDY
+        lda RandomSeed
+        lsr
+        lsr
+        lda #-BALL_SERVE_SPEED
+        bcc RandDYStore
+        lda #BALL_SERVE_SPEED
+RandDYStore
         sta BallDY
         rts
 
