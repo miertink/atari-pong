@@ -1,209 +1,131 @@
-; Pong para Atari 2600 (NTSC)
+; Pong for Atari 2600 (NTSC)
 ;
-; Estado atual (2026-09-22): Marco 0, Incremento 5 — completa o spike.
-;   - P0/P1 (raquetes): joystick move na vertical; posicao horizontal fixa,
-;     definida uma unica vez no Reset.
-;   - BL (bola): se move, quica no topo/base (paredes visuais reintroduzidas
-;     no Incremento 5), colide com as raquetes (hardware) e soma ponto pro
-;     adversario quando passa reto por uma raquete. Velocidade em 2 fases:
-;     BALL_SERVE_SPEED no saque, acelera (um unico degrau, nao continuo)
-;     pra BALL_RALLY_SPEED na primeira colisao com raquete. Deteccao de
-;     quique/ponto por desigualdade (nao igualdade exata) — robusta a
-;     qualquer velocidade, sem exigir paridade combinada entre posicao/
-;     velocidade/limites (lição da fragilidade anterior, ver constantes).
-;   - Saque com direcao E angulo aleatorios (LFSR de 8 bits, AdvanceRandom):
-;     3 perfis de angulo (raso/medio/ingreme, via BallSkipMode fazendo um
-;     eixo pular frames impares — NAO via magnitude de DX/DY diferente,
-;     que mudava a velocidade diagonal total entre perfis, bug corrigido)
-;     x 4 quadrantes de direcao = ate 12 trajetorias de saque possiveis.
-;     Rebatida na raquete ganha "efeito": se a raquete estava em movimento
-;     no instante da colisao, o angulo vertical da bola fecha ou abre na
-;     mesma direcao (P0Dir/P1Dir).
-;   - Placar (ScoreP0/ScoreP1) contado em RAM, sem exibicao visual ainda —
-;     digitos na tela ficam para depois do Marco 0 (ja previsto no README).
+; Current state: Marco 0 complete (paddles, ball, wall bounce, hardware
+; collision, scoring, sound, randomized serve).
+;   - P0/P1 (paddles): joystick moves them vertically; horizontal position
+;     fixed, set once in Reset.
+;   - BL (ball): moves, bounces off the walls, collides with paddles via
+;     hardware, and awards a point when it passes a paddle uncontested.
+;     Speed has two phases: BALL_SERVE_SPEED at serve, a single step up to
+;     BALL_RALLY_SPEED on the first paddle hit (not continuous
+;     acceleration — constant after that). Serve direction and angle are
+;     randomized (8-bit LFSR); a moving paddle at the moment of contact
+;     nudges the ball's vertical angle (English/spin).
+;   - Score (ScoreP0/ScoreP1) tracked in RAM only, no on-screen digits yet
+;     (separate kernel work for after Marco 0 — see README).
 ;
-; Historico de bugs corrigidos (Incremento 2, 2026-09-22):
-;   1) Deslocamento subito de ~1px em objetos ao mexer no joystick: causa
-;      mais provavel era reforcar HMOVE todo frame sem necessidade (efeito
-;      "HMOVE comb" da TIA). Resolvido ao reposicionar P0/P1 uma unica vez
-;      no Reset em vez de todo frame. Residual de ~1px aceito pelo usuario
-;      como particularidade do emulador, sem impacto pratico.
-;   2) Fragmento de raquete "vazando" para o topo da tela quando encostada
-;      no limite inferior: GRP0/GRP1/ENABL nao eram zerados fora do kernel
-;      visivel, entao o ultimo valor da linha 191 sobrevivia pelo
-;      VSYNC/VBLANK do frame seguinte. Corrigido zerando os tres ao sair da
-;      area visivel.
-;   3) Bola sumindo com as raquetes na metade superior da tela: causa era a
-;      bola ter so 1 scanline de altura (objeto fino demais para renderizar
-;      de forma confiavel). Corrigido aumentando para 2 scanlines.
+; Engineering notes worth keeping in mind when touching this code:
 ;
-; Timing do VBLANK: usa o timer de hardware do RIOT (TIMER_SETUP/TIMER_WAIT,
-; do macro.h) em vez de contar WSYNCs a mao. Motivo (bug real encontrado em
-; 2026-09-22, reportado como "movimento da bola sofrivel/picotado"):
-; SetHorizPos usa um loop de "subtrai 15 ate estourar" cujo numero de
-; iteracoes varia com o valor de X. Para X pequeno (~4) custa ~30 ciclos; para
-; X grande (~150-159) passa de 80 ciclos — acima do orcamento de 76/scanline.
-; Contar WSYNCs a mao so funciona para custo CONSTANTE por linha; para custo
-; variavel, o timer de hardware absorve a variacao automaticamente.
+; - VBLANK timing uses the RIOT hardware timer (TIMER_SETUP/TIMER_WAIT from
+;   macro.h) instead of hand-counted WSYNCs. SetHorizPos's cost depends on
+;   its input (divide-by-15 loop): ~30 cycles for small X, >80 for X near
+;   150-159 — over the 76-cycle/scanline budget if counted by hand. The
+;   timer absorbs that variance automatically.
 ;
-; HMOVE precisa de WSYNC logo antes (requisito de hardware, janela de ~24
-; ciclos, nao so orcamento) — regressao real cometida e corrigida na mesma
-; investigacao (raquetes chegaram a se mover sozinhas por causa disso).
+; - HMOVE must be strobed right after a WSYNC (hardware requirement, ~24
+;   cycle window) — not just a matter of budget. Skipping this once made
+;   the paddles drift sideways on their own.
 ;
-; Gangueira residual apos os fixes acima ("para e pula"/"galopa em vez de
-; deslizar", salto maior que o passo normal, a cada ~7-8 frames):
-; diagnosticada empiricamente (fundo da tela piscando com Frame e depois
-; com BallX) como NAO sendo bug de dados/timing geral — RAM e frame rate
-; confirmados corretos a cada frame. Primeira hipotese (bola fina demais
-; pro passo de 2px aparecer) testada e DESCARTADA — aumentar a largura para
-; 8 color clocks nao mudou nada, provando que o movimento era mesmo
-; discreto, nao so dificil de perceber.
+; - HMCLR must NOT be strobed immediately (3 cycles) after HMOVE for an
+;   object that keeps moving: the fine-motion injection isn't
+;   instantaneous, and clearing HMBL too soon truncates it, leaving only
+;   the coarse RESBL reposition — the ball "galloped" in ~15-unit jumps
+;   instead of sliding. Fixed by dropping HMCLR from the ball's per-frame
+;   reposition (HMBL gets overwritten fresh next frame anyway) and adding
+;   slack before it in Reset (where it's still needed once, to zero
+;   HMP0/HMP1 so the ball's later HMOVE calls don't reapply them).
 ;
-; Causa raiz real: no bloco "move a bola" do MainLoop, HMCLR era estrobado
-; so 3 ciclos depois do HMOVE. Suspeita: a injecao do ajuste fino do HMOVE
-; nao e instantanea, e zerar HMBL cedo demais cortava essa injecao antes de
-; completar — so o reposicionamento grosso (RESBL, que nao depende do
-; HMOVE) sobrevivia, dando saltos de ~15 unidades a cada ~7-8 frames em vez
-; de deslizar 2px por vez. Remover o HMCLR dali (nao e necessario — HMBL e
-; reescrito do zero pelo SetHorizPos antes do PROXIMO HMOVE) resolveu,
-; confirmado pelo usuario. O mesmo HMCLR no Reset (que posiciona P0/P1/BL
-; uma unica vez) provavelmente causava o residual de ~1px aceito la atras
-; como "particularidade do emulador" — mantido ali, mas com um WSYNC extra
-; de folga antes de zerar (nao pode ser removido, senao o HMOVE da bola no
-; MainLoop reaplicaria o HMP0/HMP1 do Reset a cada frame — o bug das
-; raquetes se movendo sozinhas, ja corrigido antes).
+; - Bounce/score bounds are checked with inequalities (>=/<=), not exact
+;   equality: BallX/BallY can take different step sizes during the game
+;   (serve vs. rally speed, skip-frame angle), so an exact-match boundary
+;   check would occasionally get stepped over and missed.
 
         processor 6502
         include "vcs.h"
         include "macro.h"
 
-; ---- Constantes de geometria/cor ----
-PADDLE_HT      = 32             ; altura da raquete, em scanlines (era 16 —
-                                 ; dobrada a pedido do usuario, melhora
-                                 ; jogabilidade)
-PADDLE_PATTERN = %00111100      ; padrao de bits da raquete (GRP0/GRP1)
-PADDLE_SPEED   = 3              ; scanlines por frame, ao segurar o joystick
-                                 ; (era 2, igual a BALL_SPEED — usuario pediu
-                                 ; a bola pelo menos 1/3 mais lenta que a
-                                 ; raquete: (3-2)/3 = 33%)
-PADDLE_Y_MAX   = 192-PADDLE_HT  ; maior valor valido de P0Y/P1Y (base = linha 191)
-WALL_HT        = 8              ; espessura das paredes topo/base, em scanlines
-BALL_HT        = 4              ; altura da bola, em scanlines (era 2)
-BALL_SIZE      = %00100000      ; CTRLPF: bola com 4 color clocks de largura
-                                 ; (era 8 — testado largo demais depois do
-                                 ; fix do HMCLR; ajuste cosmetico: mais
-                                 ; estreita e mais alta, a pedido do usuario)
+; ---- Geometry / color constants ----
+PADDLE_HT      = 32             ; paddle height, in scanlines
+PADDLE_PATTERN = %00111100      ; paddle bit pattern (GRP0/GRP1)
+PADDLE_SPEED   = 3              ; scanlines/frame while holding the joystick
+PADDLE_Y_MAX   = 192-PADDLE_HT  ; highest valid P0Y/P1Y (bottom = line 191)
+WALL_HT        = 8              ; top/bottom wall thickness, in scanlines
+BALL_HT        = 4              ; ball height, in scanlines
+BALL_SIZE      = %00100000      ; CTRLPF: ball width = 4 color clocks
 COLOR_WHITE    = $0E
 
-; limites de quique/ponto da bola (0-159 horizontal, mesma escala usada por
-; SetHorizPos; verticais em linhas de scanline, 0-191). A deteccao compara
-; POR DESIGUALDADE (">="/"<="), nao igualdade exata — funciona pra
-; qualquer velocidade, mesmo se BallDX/BallDY mudar de valor durante o
-; jogo (ver BALL_SERVE_SPEED/BALL_RALLY_SPEED abaixo), sem exigir que a
-; bola "acerte" o limite exatamente. (Versao anterior comparava igualdade
-; exata e exigia paridade combinada entre posicao inicial/velocidade/
-; limites — funcionava, mas quebrava toda vez que a velocidade mudava;
-; a checagem por desigualdade elimina essa fragilidade de vez.)
+; Ball bounce/score bounds (0-159 horizontal, same scale as SetHorizPos;
+; vertical in scanlines, 0-191). Checked by inequality, not exact match —
+; see engineering notes above.
 BALL_X_MIN     = 2
 BALL_X_MAX     = 158
-BALL_Y_MIN     = WALL_HT              ; quica na face interna da parede,
-BALL_Y_MAX     = 192-WALL_HT-BALL_HT  ; nao no limite absoluto da tela
+BALL_Y_MIN     = WALL_HT              ; bounces off the wall's inner face,
+BALL_Y_MAX     = 192-WALL_HT-BALL_HT  ; not the screen's absolute edge
 
-; Velocidade da bola tem duas fases: comeca devagar no saque (antes da
-; primeira raquetada) e acelera UMA VEZ, na primeira colisao com raquete,
-; ficando constante dali em diante (nao e aceleracao continua — a regra de
-; "sem aceleracao" continua valendo durante o rally; e so um degrau no
-; primeiro toque, pedido pelo usuario). Serve < Rally < Paddle:
-; BALL_SERVE_SPEED(1) -> BALL_RALLY_SPEED(2): 50% mais lento no saque.
-; BALL_RALLY_SPEED(2) vs PADDLE_SPEED(3): bola 33% mais lenta que raquete
-; durante o rally (regra definida antes).
+; Ball speed: slow at serve, one step up to rally speed on the first
+; paddle hit, then constant (no continuous acceleration during a rally).
+; Serve(1) < Rally(2) < Paddle(3) — ball always stays slower than the paddle.
 BALL_SERVE_SPEED = 1
 BALL_RALLY_SPEED = 2
-; sem BALL_DX_INIT/BALL_DY_INIT fixos: a direcao do saque agora e aleatoria
-; (ver ResetBall) — pedido do usuario, saque nao pode ser sempre pro mesmo
-; lado.
 
-; Angulo de saque tambem aleatorio (nao so a direcao/quadrante). Tentativa
-; anterior variava a MAGNITUDE de DX/DY por eixo (ex.: |DX|=2,|DY|=1 pro
-; angulo raso) — mas isso muda a velocidade diagonal total (raso/ingreme
-; ficavam ~58% mais rapidos que o angulo medio), o que o usuario reportou
-; como "velocidade do saque aleatoria" (bug real, nao intencional).
-;
-; Corrigido: em vez de magnitude, varia a FREQUENCIA de cada eixo. BallDX e
-; BallDY sempre tem magnitude BALL_SERVE_SPEED (nunca muda); o angulo vem
-; de BallSkipMode fazendo um dos dois eixos so se mover em frames
-; alternados (ver bloco de movimento no MainLoop). Isso mantem a
-; velocidade de cada eixo fixa; a velocidade diagonal total varia bem
-; menos entre os perfis (raso/ingreme ficam ~21% mais lentos que o medio,
-; em vez dos ~58% mais rapidos de antes — inverteu e reduziu bastante a
-; diferenca, mais aceitavel visualmente).
-BALL_SKIP_NONE   = 0             ; 45 graus: os 2 eixos se movem todo frame
-BALL_SKIP_Y      = 1             ; raso (~27 graus): Y pula frames impares
-BALL_SKIP_X      = 2             ; ingreme (~63 graus): X pula frames impares
+; Serve angle: 3 profiles, picked by FREQUENCY (which axis, if any, skips
+; odd frames) rather than by step magnitude — magnitude-based profiles
+; changed the total diagonal speed between angles, which wasn't intended.
+BALL_SKIP_NONE = 0               ; 45 degrees: both axes move every frame
+BALL_SKIP_Y    = 1               ; shallow (~27 deg): Y skips odd frames
+BALL_SKIP_X    = 2               ; steep (~63 deg): X skips odd frames
 
-; "efeito" da raquete na rebatida: se a raquete estava em movimento no
-; instante da colisao, BallDY ganha um nudge de +-BALL_SPIN na mesma
-; direcao do movimento da raquete (steering classico de Pong). Combinado
-; com BALL_RALLY_SPEED(2), a magnitude final de BallDY fica em [1,3] —
-; nunca zero (nao trava num angulo horizontal), nunca absurdo.
+; Paddle English: a moving paddle at the moment of contact nudges BallDY
+; by +-BALL_SPIN in its own direction. Combined with BALL_RALLY_SPEED(2),
+; final BallDY magnitude lands in [1,3] — never zero, never extreme.
 BALL_SPIN      = 1
 
-; colisao bola<->raquete (hardware CXP0FB/CXP1FB, bit 6 = colisao com a bola;
-; bit 7 seria colisao com playfield, nao usado aqui) + bip curto
+; Ball<->paddle collision (hardware CXP0FB/CXP1FB, bit 6 = ball collision;
+; bit 7 would be playfield, unused here) + short beep.
 COLLISION_BL   = %01000000
-SOUND_HIT_TONE = 4              ; AUDC0: "pure tone" (onda quadrada limpa).
-                                 ; Era 8 ("9-bit poly" = ruido branco/chiado
-                                 ; na TIA — nao e tom, e a tabela de valores
-                                 ; que eu assumi errado).
-SOUND_HIT_FREQ = 4              ; AUDF0: agudo (valor baixo = frequencia alta)
-SOUND_HIT_VOL  = 12             ; AUDV0: volume (0-15)
-SOUND_HIT_LEN  = 4              ; duracao do bip, em frames
+SOUND_HIT_TONE = 4               ; AUDC0: pure tone (clean square wave)
+SOUND_HIT_FREQ = 4               ; AUDF0: high pitch (low value = high freq)
+SOUND_HIT_VOL  = 12              ; AUDV0: volume (0-15)
+SOUND_HIT_LEN  = 4               ; beep duration, in frames
 
-; som de ponto marcado: mais grave e mais longo que o bip de colisao, pra
-; dar pra distinguir os dois mesmo sem placar visual ainda (dígitos ficam
-; pra depois do Marco 0, ja previsto no README)
-SOUND_SCORE_TONE = 12           ; AUDC0: "div 6 pure tone" (mais grave)
+; Score sound: lower and longer than the hit beep, so the two are
+; distinguishable even with no on-screen scoreboard yet.
+SOUND_SCORE_TONE = 12            ; AUDC0: div-6 pure tone (lower pitch)
 SOUND_SCORE_FREQ = 20
 SOUND_SCORE_VOL  = 12
 SOUND_SCORE_LEN  = 15
 
-P0_X           = 4              ; posicao horizontal fixa da raquete esquerda
-                                 ; (ajustado: 3x a largura da raquete a menos
-                                 ; que os 16 originais, a pedido do usuario)
-P1_X           = 140            ; posicao horizontal fixa da raquete direita
-BALL_X_INIT    = 80             ; posicao horizontal inicial da bola (centro)
-P0_Y_INIT      = 80             ; topo da raquete esquerda (linha 0-191);
-                                 ; recalculado para o centro da tela com
-                                 ; PADDLE_HT=32 (era 88, para PADDLE_HT=16)
-P1_Y_INIT      = 80
+P0_X           = 4              ; left paddle's fixed horizontal position
+P1_X           = 140            ; right paddle's fixed horizontal position
+BALL_X_INIT    = 80             ; ball's initial horizontal position (center)
+P0_Y_INIT      = 80             ; left paddle's top (line 0-191); centered
+P1_Y_INIT      = 80             ; for PADDLE_HT=32
 BALL_Y_INIT    = 96
 
         SEG.U vars
         ORG $80
-Frame   ds 1                    ; contador de frames (para uso futuro)
-P0Y     ds 1                    ; topo da raquete esquerda
-P0YEnd  ds 1                    ; P0Y + PADDLE_HT (pre-calculado)
-P1Y     ds 1                    ; topo da raquete direita
-P1YEnd  ds 1                    ; P1Y + PADDLE_HT (pre-calculado)
-BallX   ds 1                    ; coluna da bola (escala 0-159, mesma do SetHorizPos)
-BallY   ds 1                    ; topo da bola
-BallYEnd ds 1                   ; BallY + BALL_HT (pre-calculado)
-BallDX  ds 1                    ; velocidade horizontal: +-BALL_SERVE_SPEED
-                                 ; ou +-BALL_RALLY_SPEED (+-BALL_SPIN em BallDY)
-BallDY  ds 1                    ; velocidade vertical, mesma escala de BallDX
-SoundTimer ds 1                 ; frames restantes do bip de colisao (0 = silencio)
-ScoreP0 ds 1                    ; pontos do jogador da esquerda (sem exibicao
-ScoreP1 ds 1                    ; visual ainda — ver nota no Incremento 5)
-RandomSeed ds 1                 ; estado do LFSR pseudo-aleatorio (nunca pode
-                                 ; ser 0 — ver AdvanceRandom)
-P0Dir   ds 1                    ; direcao da raquete esquerda NESTE frame:
-P1Dir   ds 1                    ; -1 (subindo), 0 (parada) ou +1 (descendo).
-                                 ; Usado pra dar "efeito" na bola ao rebater.
-BallSkipMode ds 1                ; BALL_SKIP_NONE/Y/X — qual eixo (se algum)
-                                 ; pula frames impares, pra dar angulo de
-                                 ; saque sem mudar a velocidade por eixo.
-                                 ; Volta a BALL_SKIP_NONE na 1a colisao com
-                                 ; raquete (rally usa so o efeito de spin).
+Frame   ds 1                    ; frame counter
+P0Y     ds 1                    ; left paddle's top
+P0YEnd  ds 1                    ; P0Y + PADDLE_HT (precomputed)
+P1Y     ds 1                    ; right paddle's top
+P1YEnd  ds 1                    ; P1Y + PADDLE_HT (precomputed)
+BallX   ds 1                    ; ball column (0-159 scale, same as SetHorizPos)
+BallY   ds 1                    ; ball's top
+BallYEnd ds 1                   ; BallY + BALL_HT (precomputed)
+BallDX  ds 1                    ; horizontal speed: +-BALL_SERVE_SPEED or
+                                 ; +-BALL_RALLY_SPEED (+-BALL_SPIN on BallDY)
+BallDY  ds 1                    ; vertical speed, same scale as BallDX
+SoundTimer ds 1                 ; frames left on the current beep (0 = silent)
+ScoreP0 ds 1                    ; left player's score (no on-screen display
+ScoreP1 ds 1                    ; yet — see header)
+RandomSeed ds 1                 ; LFSR state (must never be 0 — see AdvanceRandom)
+P0Dir   ds 1                    ; this frame's paddle direction: -1 (up),
+P1Dir   ds 1                    ; 0 (still), +1 (down) — used for ball English
+BallSkipMode ds 1                ; BALL_SKIP_NONE/Y/X — which axis (if any)
+                                 ; skips odd frames for the serve angle.
+                                 ; Reset to BALL_SKIP_NONE on the first
+                                 ; paddle hit (rally only uses the spin
+                                 ; effect).
 
         SEG code
         ORG $F000
@@ -211,7 +133,7 @@ BallSkipMode ds 1                ; BALL_SKIP_NONE/Y/X — qual eixo (se algum)
 Reset
         CLEAN_START
 
-        ; esquema monocromatico classico: raquetes/bola brancas, fundo preto
+        ; classic monochrome look: white paddles/ball, black background
         lda #COLOR_WHITE
         sta COLUP0
         sta COLUP1
@@ -232,19 +154,18 @@ Reset
         adc #PADDLE_HT
         sta P1YEnd
 
-        ; semente do gerador pseudo-aleatorio (nunca pode ser 0 — ver
-        ; AdvanceRandom). Valor exato nao importa muito: o "aleatorio" de
-        ; verdade vem do numero de frames ja passados quando cada saque
-        ; acontece (varia com o tempo de reacao do jogador), nao da semente.
+        ; PRNG seed (must never be 0 — see AdvanceRandom). The exact value
+        ; barely matters: the real "randomness" comes from how many frames
+        ; have ticked by whenever a serve actually happens (which depends
+        ; on player reaction time), not from the seed itself.
         lda #$2B
         sta RandomSeed
 
-        jsr ResetBall            ; posiciona a bola no centro, direcao aleatoria
+        jsr ResetBall            ; center the ball, random direction/angle
 
-        ; Posicionamento horizontal inicial (uma vez). P0/P1 nunca mais se
-        ; reposicionam na horizontal (so se movem na vertical). A bola e
-        ; reposicionada de novo a cada frame no MainLoop, ja que agora ela
-        ; se move (ver bloco "move a bola" abaixo).
+        ; One-time horizontal positioning. P0/P1 never reposition
+        ; horizontally again (only move vertically); the ball is
+        ; repositioned every frame in MainLoop since it moves.
         lda #P0_X
         ldx #0
         jsr SetHorizPos          ; P0
@@ -256,22 +177,18 @@ Reset
         jsr SetHorizPos          ; BL
         sta WSYNC
         sta HMOVE
-        ; HMCLR NAO estrobado logo em seguida (mesma causa raiz do "desliza"
-        ; corrigido no MainLoop, ver comentario la): zerar HMOVE 3 ciclos
-        ; depois pode cortar a injecao do ajuste fino antes de completar.
-        ; Aqui a diferenca e que P0/P1/BL nao vao ser reposicionados de novo
-        ; tao cedo (P0/P1 nunca mais; a bola so no proximo frame), entao
-        ; HMP0/HMP1/HMBL PRECISAM ser zerados em algum momento — senao o
-        ; HMOVE da bola no MainLoop reaplicaria o valor de HMP0/HMP1 do
-        ; Reset a cada frame (foi exatamente o bug das raquetes se movendo
-        ; sozinhas, corrigido antes). Por isso aqui so adiamos o HMCLR (mais
-        ; um WSYNC de folga) em vez de tira-lo — o Reset roda uma vez so,
-        ; entao gastar uma linha extra nao custa nada.
+        ; HMCLR is deliberately NOT strobed right after HMOVE here — see
+        ; the header note. P0/P1/BL won't reposition again for a while
+        ; (P0/P1 never; the ball not until next frame), but HMP0/HMP1/HMBL
+        ; still need clearing eventually so the ball's later HMOVE calls
+        ; don't reapply them (that's what made the paddles drift on their
+        ; own). Reset only runs once, so an extra line of slack costs
+        ; nothing.
         sta WSYNC
         sta HMCLR
 
 MainLoop
-        ; --- VSYNC: 3 linhas ---
+        ; --- VSYNC: 3 lines ---
         lda #2
         sta VSYNC
         sta WSYNC
@@ -280,19 +197,18 @@ MainLoop
         lda #0
         sta VSYNC
 
-        ; --- VBLANK: 37 linhas, reservadas via timer de hardware (ver nota
-        ; no cabecalho do arquivo) ---
+        ; --- VBLANK: 37 lines, reserved via the hardware timer (see header) ---
         lda #2
         sta VBLANK
         TIMER_SETUP 37
 
-        jsr AdvanceRandom        ; 1x por frame, sempre — mantem o LFSR "girando"
-                                 ; independente do jogo, pra parecer aleatorio
-                                 ; no instante em que um saque de fato acontece
+        jsr AdvanceRandom        ; every frame, unconditionally — keeps the
+                                 ; LFSR "spinning" independent of gameplay,
+                                 ; so it looks random whenever a serve happens
 
-        ; --- move raquete P0 (joystick 0 = porta esquerda: bit4=Up, bit5=Down) ---
-        ; P0Dir registra a direcao deste frame (-1/0/+1) pra dar "efeito" na
-        ; bola se a colisao acontecer nesta mesma janela de tempo.
+        ; --- move paddle P0 (joystick 0 = left port: bit4=Up, bit5=Down) ---
+        ; P0Dir records this frame's direction (-1/0/+1), used for ball
+        ; English if a collision happens in this same window.
         lda #0
         sta P0Dir
         lda SWCHA
@@ -327,7 +243,7 @@ SkipP0Down
         adc #PADDLE_HT
         sta P0YEnd
 
-        ; --- move raquete P1 (joystick 1 = porta direita: bit0=Up, bit1=Down) ---
+        ; --- move paddle P1 (joystick 1 = right port: bit0=Up, bit1=Down) ---
         lda #0
         sta P1Dir
         lda SWCHA
@@ -362,30 +278,29 @@ SkipP1Down
         adc #PADDLE_HT
         sta P1YEnd
 
-        ; --- move a bola: quique vertical (topo/base) ---
-        ; Deteccao por desigualdade (BallY <= MIN / >= MAX), nao igualdade
-        ; exata — ver nota nas constantes. Ao quicar, INVERTE O SINAL de
-        ; BallDY preservando a magnitude atual (NormalizeSignBallDY), em
-        ; vez de escrever uma constante fixa — a velocidade pode ser
-        ; BALL_SERVE_SPEED ou BALL_RALLY_SPEED dependendo se a bola ja foi
-        ; rebatida ou nao, e o quique nao deve alterar isso.
+        ; --- move the ball: vertical bounce (top/bottom) ---
+        ; Bounds checked by inequality (BallY <= MIN / >= MAX), not exact
+        ; match — see header note. On bounce, NEGATE BallDY's sign while
+        ; keeping its current magnitude (NegateBallDY) rather than writing
+        ; a fixed constant — speed can be BALL_SERVE_SPEED or
+        ; BALL_RALLY_SPEED depending on whether the ball's been hit yet,
+        ; and bouncing shouldn't change that.
         lda BallY
         cmp #BALL_Y_MIN+1
-        bcs NoTopBounce          ; BallY > BALL_Y_MIN, ainda nao chegou la
+        bcs NoTopBounce          ; BallY > BALL_Y_MIN, not there yet
         lda BallDY
-        bpl NoTopBounce          ; ja indo pra baixo (>=0), nada a fazer
+        bpl NoTopBounce          ; already heading down (>=0), nothing to do
         jsr NegateBallDY
 NoTopBounce
         lda BallY
         cmp #BALL_Y_MAX
-        bcc NoBottomBounce       ; BallY < BALL_Y_MAX, ainda nao chegou la
+        bcc NoBottomBounce       ; BallY < BALL_Y_MAX, not there yet
         lda BallDY
-        bmi NoBottomBounce       ; ja indo pra cima (<0), nada a fazer
+        bmi NoBottomBounce       ; already heading up (<0), nothing to do
         jsr NegateBallDY
 NoBottomBounce
-        ; aplica o movimento vertical, a menos que o perfil de angulo seja
-        ; BALL_SKIP_Y e este seja um frame impar (angulo de saque raso —
-        ; ver nota em BALL_SKIP_NONE/Y/X nas constantes)
+        ; apply the vertical move, unless the angle profile is BALL_SKIP_Y
+        ; and this is an odd frame (shallow serve angle)
         lda BallSkipMode
         cmp #BALL_SKIP_Y
         bne DoMoveY
@@ -403,90 +318,79 @@ SkipMoveY
         adc #BALL_HT
         sta BallYEnd
 
-        ; --- move a bola: horizontal — deteccao de ponto ---
-        ; Se a bola chega a (ou passa de) BALL_X_MIN/MAX, e porque passou
-        ; pela raquete sem colidir (colisao real ja teria invertido BallDX
-        ; antes disso, no bloco de colisao apos o kernel visivel).
-        ; Deteccao por desigualdade, mesma logica do quique vertical.
+        ; --- move the ball: horizontal — score detection ---
+        ; If the ball reaches (or passes) BALL_X_MIN/MAX, it went by a
+        ; paddle uncontested (a real collision would already have flipped
+        ; BallDX earlier, in the post-kernel collision block). Same
+        ; inequality-based check as the vertical bounce.
         lda BallX
         cmp #BALL_X_MIN+1
-        bcs NoScoreP1            ; BallX > BALL_X_MIN, ainda nao chegou la
-        inc ScoreP1              ; bola passou pela raquete esquerda -> ponto do jogador da direita
+        bcs NoScoreP1            ; BallX > BALL_X_MIN, not there yet
+        inc ScoreP1              ; ball passed the left paddle -> right player scores
         jsr StartScoreSound
         jsr ResetBall
         jmp BallMoveDone
 NoScoreP1
         lda BallX
         cmp #BALL_X_MAX
-        bcc NoScoreP0            ; BallX < BALL_X_MAX, ainda nao chegou la
-        inc ScoreP0              ; bola passou pela raquete direita -> ponto do jogador da esquerda
+        bcc NoScoreP0            ; BallX < BALL_X_MAX, not there yet
+        inc ScoreP0              ; ball passed the right paddle -> left player scores
         jsr StartScoreSound
         jsr ResetBall
         jmp BallMoveDone
 NoScoreP0
-        ; mesma logica de skip do bloco vertical, agora pro eixo X
-        ; (BALL_SKIP_X = angulo de saque ingreme)
+        ; same skip logic as the vertical block, for the X axis this time
+        ; (BALL_SKIP_X = steep serve angle)
         lda BallSkipMode
         cmp #BALL_SKIP_X
         bne DoMoveX
         lda Frame
         and #1
-        bne BallMoveDone         ; impar -> pula X, pula reto pro fim do bloco
+        bne BallMoveDone         ; odd frame -> skip X, jump straight to the end
 DoMoveX
         lda BallX
         clc
         adc BallDX
         sta BallX
 BallMoveDone
-        ; recarrega A explicitamente: nos caminhos de ponto marcado, A saiu
-        ; do ResetBall/StartScoreSound com outro valor, nao com BallX
+        ; explicit reload: on the score paths, A came out of
+        ; ResetBall/StartScoreSound holding something other than BallX
         lda BallX
 
-        ; reposiciona a bola na horizontal (unico objeto que ainda se move
-        ; na horizontal neste incremento). SetHorizPos faz seu proprio
-        ; WSYNC interno, necessario para o calculo de posicao.
+        ; Reposition the ball horizontally (the only object that still
+        ; moves horizontally here). SetHorizPos does its own internal
+        ; WSYNC, needed for the position math.
         ;
-        ; O "sta WSYNC" abaixo, antes do HMOVE, NAO e sobre orcamento de
-        ; ciclos (o timer ja cobre isso) — e um requisito de hardware:
-        ; HMOVE precisa ser estrobado logo no inicio de uma scanline (~24
-        ; ciclos de janela). Sem isso, como SetHorizPos pode levar ate ~80
-        ; ciclos para retornar (dependendo do X), o HMOVE ficava sendo
-        ; estrobado tarde demais na linha — e um HMOVE fora da janela pode
-        ; aplicar deslocamento incorreto/espurio a QUALQUER objeto, nao so
-        ; ao que acabou de ser reposicionado. Isso explicava tanto a
-        ; gangueira (piorada) quanto as raquetes se deslocando na horizontal
-        ; mesmo com HMP0/HMP1 zerados. Bug introduzido na refatoracao do
-        ; timer (removi este WSYNC achando que era so questao de orcamento).
+        ; The "sta WSYNC" below, before HMOVE, is NOT about cycle budget
+        ; (the timer already covers that) — it's a hardware requirement:
+        ; HMOVE must be strobed right at the start of a scanline (~24
+        ; cycle window). See header note.
         ldx #4
         jsr SetHorizPos
         sta WSYNC
         sta HMOVE
-        ; SEM HMCLR aqui — confirmado pelo usuario que resolve a "gangueira"
-        ; (bola "galopando" em vez de deslizar). Causa raiz: HMCLR estrobado
-        ; so 3 ciclos depois do HMOVE cortava a injecao do ajuste fino antes
-        ; de completar; so o reposicionamento grosso (RESBL, que nao
-        ; depende do HMOVE) sobrevivia, dando saltos de ~15 unidades a cada
-        ; ~7-8 frames em vez de deslizar 2px por vez. Nao precisamos de
-        ; HMCLR aqui de qualquer forma: HMBL e reescrito do zero pelo
-        ; SetHorizPos antes do PROXIMO HMOVE, entao nao ha valor obsoleto
-        ; para vazar de um frame pro outro. (HMP0/HMP1 continuam OK porque
-        ; ja foram zerados uma vez no Reset — ver comentario la.)
+        ; No HMCLR here — see header note (a truncated fine-motion
+        ; injection was the root cause of the ball "galloping" instead of
+        ; sliding). Not needed anyway: HMBL gets overwritten fresh by
+        ; SetHorizPos before the next HMOVE, so nothing stale carries over
+        ; between frames. (HMP0/HMP1 stay fine — already zeroed once in
+        ; Reset.)
 
         TIMER_WAIT
         lda #0
         sta VBLANK
 
-        ; --- Area visivel: 192 linhas, em 3 zonas (parede topo / meio / parede
-        ; base). As paredes sao so cor de fundo (COLUBK), nao objetos reais —
-        ; sem colisao de hardware com a bola (o quique perto delas e feito
-        ; via BALL_Y_MIN/MAX, ver bloco de movimento no VBLANK).
+        ; --- Visible area: 192 lines, in 3 zones (top wall / middle /
+        ; bottom wall). The walls are just background color (COLUBK), not
+        ; real objects — no hardware collision with the ball (bouncing
+        ; near them is handled via BALL_Y_MIN/MAX in the VBLANK move block).
         ;
-        ; Por que 3 zonas em vez de checar "e parede?" dentro de 1 loop so:
-        ; ja fizemos essa conta no Incremento 1 — comparar contra WALL_HT em
-        ; toda linha custa ~15-17 ciclos extras, o que estoura o orcamento de
-        ; 76/scanline somado a raquetes+bola (~61). Com 3 zonas, a cor de
-        ; fundo e fixada 1x por zona (fora do loop), e o corpo de cada loop
-        ; fica identico ao de antes (~61 ciclos), so triplicado no codigo.
+        ; Why 3 zones instead of checking "is this a wall line?" inside a
+        ; single loop: that costs ~15-17 extra cycles per line, blowing
+        ; the 76-cycle/scanline budget on top of paddles+ball (~61). With
+        ; 3 zones, the background color is set once per zone (outside the
+        ; loop), and each loop body stays identical to before (~61
+        ; cycles), just tripled in source.
         inc Frame
 
         lda #COLOR_WHITE
@@ -595,37 +499,36 @@ SkipBBall
         cpx #192
         bne BottomWallLoop
 
-        ; zera os objetos ao sair da area visivel: sem isso, o ultimo valor
-        ; escrito na linha 191 (ex.: raquete encostada no limite inferior)
-        ; sobrevive por todo o VSYNC/VBLANK do proximo frame.
+        ; clear the objects when leaving the visible area: without this,
+        ; the last value written on line 191 (e.g. a paddle against the
+        ; bottom edge) survives through VSYNC/VBLANK into the next frame.
         lda #0
         sta GRP0
         sta GRP1
         sta ENABL
 
-        ; --- colisao bola<->raquete (hardware) ---
-        ; CXP0FB/CXP1FB acumulam colisoes durante toda a area visivel que
-        ; acabou de rodar; ler agora pega o resultado do frame inteiro.
-        ; CXCLR no final limpa os latches pro proximo frame (sao "sticky",
-        ; nao zeram sozinhos).
-        ; Ao colidir, a bola vai (ou continua) na velocidade de rally
-        ; (BALL_RALLY_SPEED) — na primeira colisao do saque, isso "acelera"
-        ; a bola de uma vez (BALL_SERVE_SPEED -> BALL_RALLY_SPEED); em
-        ; colisoes seguintes so reafirma o mesmo valor (nao ha aceleracao
-        ; continua). BallDY tambem tem sua magnitude ajustada pra
-        ; BALL_RALLY_SPEED, preservando o sinal (direcao vertical nao muda
-        ; por causa da colisao com raquete) — e depois recebe o "efeito" da
-        ; raquete: se P0/P1Dir indicar que a raquete estava se movendo no
-        ; instante da colisao, soma essa direcao a BallDY, deixando o
-        ; angulo mais fechado ou mais aberto (nunca chega a 0, ver nota na
-        ; constante BALL_SPIN).
+        ; --- ball<->paddle collision (hardware) ---
+        ; CXP0FB/CXP1FB accumulate collisions across the whole visible
+        ; frame that just ran; reading now picks up the full result.
+        ; CXCLR at the end clears the latches for next frame (they're
+        ; sticky, they don't clear themselves).
+        ; On a hit, the ball goes to (or stays at) rally speed
+        ; (BALL_RALLY_SPEED) — on the serve's first hit this "accelerates"
+        ; the ball once (BALL_SERVE_SPEED -> BALL_RALLY_SPEED); later hits
+        ; just reaffirm the same value (no continuous acceleration).
+        ; BallDY's magnitude is also set to BALL_RALLY_SPEED, keeping its
+        ; sign (vertical direction doesn't change on a paddle hit) — then
+        ; gets the paddle's English: if P0/P1Dir shows the paddle was
+        ; moving at the moment of contact, that direction is added to
+        ; BallDY, closing or opening the angle (never reaching 0 — see the
+        ; BALL_SPIN constant).
         lda CXP0FB
         and #COLLISION_BL
         beq NoHitP0
-        lda #BALL_RALLY_SPEED    ; bateu na raquete esquerda -> bola vai pra direita
+        lda #BALL_RALLY_SPEED    ; hit the left paddle -> ball heads right
         sta BallDX
-        lda #BALL_SKIP_NONE      ; encerra o angulo de saque (skip), so o
-        sta BallSkipMode         ; efeito de spin (abaixo) vale no rally
+        lda #BALL_SKIP_NONE      ; serve angle (skip mode) ends here; only
+        sta BallSkipMode         ; the spin effect below applies in a rally
         jsr SetBallDYToRallySpeed
         lda P0Dir
         beq NoSpinP0
@@ -638,7 +541,7 @@ NoHitP0
         lda CXP1FB
         and #COLLISION_BL
         beq NoHitP1
-        lda #-BALL_RALLY_SPEED   ; bateu na raquete direita -> bola vai pra esquerda
+        lda #-BALL_RALLY_SPEED   ; hit the right paddle -> ball heads left
         sta BallDX
         lda #BALL_SKIP_NONE
         sta BallSkipMode
@@ -653,7 +556,7 @@ NoSpinP1
 NoHitP1
         sta CXCLR
 
-        ; --- som: decrementa o timer do bip, silencia quando chega a 0 ---
+        ; --- sound: count down the beep timer, silence it at 0 ---
         lda SoundTimer
         beq SoundDone
         dec SoundTimer
@@ -662,7 +565,7 @@ NoHitP1
         sta AUDV0
 SoundDone
 
-        ; --- Overscan: 30 linhas ---
+        ; --- Overscan: 30 lines ---
         lda #2
         sta VBLANK
         ldx #30
@@ -674,13 +577,14 @@ OverscanLoop
         jmp MainLoop
 
 ; ---------------------------------------------------------------------------
-; SetHorizPos - posiciona horizontalmente um objeto da TIA.
-; Rotina padrao da comunidade Atari 2600 (divide-by-15 + fine adjust).
-; IN: A = coluna desejada (0-159), X = indice do objeto
-;     (0=P0, 1=P1, 2=M0, 3=M1, 4=BL — mesma ordem de RESP0..RESBL/HMP0..HMBL)
-; Chamar sempre logo apos um WSYNC (ou seja, no inicio de uma linha) durante
-; VSYNC/VBLANK; a propria rotina consome uma linha via WSYNC. Um HMOVE deve
-; ser estrobado depois, na linha seguinte, para aplicar o ajuste fino.
+; SetHorizPos - horizontally positions a TIA object.
+; Standard Atari 2600 community routine (divide-by-15 + fine adjust).
+; IN: A = desired column (0-159), X = object index
+;     (0=P0, 1=P1, 2=M0, 3=M1, 4=BL — same order as RESP0..RESBL/HMP0..HMBL)
+; Always call right after a WSYNC (i.e. at the start of a line) during
+; VSYNC/VBLANK; the routine itself consumes one line via WSYNC. An HMOVE
+; must be strobed afterward, on the following line, to apply the fine
+; adjustment.
 ; ---------------------------------------------------------------------------
 SetHorizPos
         sta WSYNC
@@ -698,9 +602,9 @@ DivideLoop
         rts
 
 ; ---------------------------------------------------------------------------
-; StartHitSound - inicia o bip de colisao (AUDC0/AUDF0/AUDV0 + SoundTimer).
-; O som e desligado automaticamente apos SOUND_HIT_LEN frames (ver bloco
-; "som" no MainLoop, que decrementa SoundTimer e zera AUDV0 quando chega a 0).
+; StartHitSound - starts the collision beep (AUDC0/AUDF0/AUDV0 + SoundTimer).
+; Turns itself off after SOUND_HIT_LEN frames (see the "sound" block in
+; MainLoop, which counts SoundTimer down and zeroes AUDV0 at 0).
 ; ---------------------------------------------------------------------------
 StartHitSound
         lda #SOUND_HIT_TONE
@@ -714,9 +618,8 @@ StartHitSound
         rts
 
 ; ---------------------------------------------------------------------------
-; StartScoreSound - inicia o som de ponto marcado (mais grave/longo que o
-; bip de colisao, ver StartHitSound). Mesmo mecanismo de desligar sozinho
-; via SoundTimer.
+; StartScoreSound - starts the "point scored" sound (lower/longer than the
+; hit beep, see StartHitSound). Same self-off mechanism via SoundTimer.
 ; ---------------------------------------------------------------------------
 StartScoreSound
         lda #SOUND_SCORE_TONE
@@ -730,9 +633,9 @@ StartScoreSound
         rts
 
 ; ---------------------------------------------------------------------------
-; NegateBallDY - inverte o sinal de BallDY preservando a magnitude atual
-; (BALL_SERVE_SPEED ou BALL_RALLY_SPEED, o que estiver valendo no momento).
-; Usado no quique vertical, onde so a DIRECAO muda, nunca a velocidade.
+; NegateBallDY - flips BallDY's sign while keeping its current magnitude
+; (BALL_SERVE_SPEED or BALL_RALLY_SPEED, whichever currently applies).
+; Used on vertical bounce, where only the direction changes, never speed.
 ; ---------------------------------------------------------------------------
 NegateBallDY
         lda #0
@@ -742,9 +645,9 @@ NegateBallDY
         rts
 
 ; ---------------------------------------------------------------------------
-; SetBallDYToRallySpeed - ajusta a MAGNITUDE de BallDY para BALL_RALLY_SPEED,
-; preservando o sinal atual (a direcao vertical nao muda por causa de uma
-; colisao com raquete, so a velocidade "acelera" pro valor de rally).
+; SetBallDYToRallySpeed - sets BallDY's MAGNITUDE to BALL_RALLY_SPEED,
+; keeping its current sign (vertical direction doesn't change on a paddle
+; hit, only the speed "accelerates" to the rally value).
 ; ---------------------------------------------------------------------------
 SetBallDYToRallySpeed
         lda BallDY
@@ -758,12 +661,12 @@ SetBallDYNegRally
         rts
 
 ; ---------------------------------------------------------------------------
-; AdvanceRandom - avanca o LFSR de 8 bits em RandomSeed por 1 passo. Chamado
-; 1x por frame (ver VBLANK), independente do jogo — mantem o valor "girando"
-; o tempo todo pra que o instante exato de um saque (que depende do tempo de
-; reacao do jogador) amostre um valor imprevisivel. Nao ha RNG de hardware
-; no Atari 2600; este e o metodo padrao da comunidade (Galois LFSR de 8
-; bits, ciclo de ate 255 estados nao-zero).
+; AdvanceRandom - advances the 8-bit LFSR in RandomSeed by one step. Called
+; once per frame (see VBLANK), unconditionally — keeps the value "spinning"
+; independent of gameplay, so the exact moment a serve happens (which
+; depends on player reaction time) samples an unpredictable value. The
+; Atari 2600 has no hardware RNG; this is the standard community technique
+; (Galois LFSR, 8-bit, cycles through up to 255 nonzero states).
 ; ---------------------------------------------------------------------------
 AdvanceRandom
         lda RandomSeed
@@ -775,17 +678,17 @@ NoRandomTap
         rts
 
 ; ---------------------------------------------------------------------------
-; ResetBall - devolve a bola ao centro da tela, com ANGULO E DIRECAO de
-; saque aleatorios (bits de RandomSeed), apos um ponto marcado ou no Reset.
-; Nao mexe em P0/P1 (raquetes ficam onde estavam).
+; ResetBall - returns the ball to center screen with a random serve ANGLE
+; AND DIRECTION (from RandomSeed bits), after a point or at Reset. Doesn't
+; touch P0/P1 (paddles stay where they were).
 ;
-; BallDX/BallDY tem magnitude FIXA (BALL_SERVE_SPEED) nos dois eixos — o
-; angulo vem de BallSkipMode (bits 2-3 de RandomSeed), que faz um dos eixos
-; pular frames impares (ver bloco de movimento no MainLoop), nao de
-; magnitudes diferentes (ver nota nas constantes: isso mudava a velocidade
-; diagonal total entre os perfis, bug reportado pelo usuario). Bits 0-1
-; escolhem o sinal (quadrante) de cada eixo — 3 perfis x 4 quadrantes = 12
-; trajetorias de saque possiveis.
+; BallDX/BallDY always have FIXED magnitude (BALL_SERVE_SPEED) on both
+; axes — the angle comes from BallSkipMode (RandomSeed bits 2-3), which
+; makes one axis skip odd frames (see the move block in MainLoop), not
+; from different magnitudes (see the constants note: that changed the
+; total diagonal speed between profiles). Bits 0-1 pick each axis's sign
+; (quadrant) — 3 profiles x 4 quadrants = up to 12 possible serve
+; trajectories.
 ; ---------------------------------------------------------------------------
 ResetBall
         lda #BALL_X_INIT
@@ -796,9 +699,9 @@ ResetBall
         adc #BALL_HT
         sta BallYEnd
 
-        ; escolhe o perfil de angulo (BallSkipMode) usando os bits 2-3 de
-        ; RandomSeed (valor 0-3; 0 e 3 caem no mesmo perfil BALL_SKIP_NONE,
-        ; leve vies aceitavel pra manter a logica simples)
+        ; pick the angle profile (BallSkipMode) from RandomSeed bits 2-3
+        ; (value 0-3; 0 and 3 both land on BALL_SKIP_NONE — a small bias,
+        ; acceptable to keep the logic simple)
         lda RandomSeed
         lsr
         lsr
@@ -807,7 +710,7 @@ ResetBall
         beq ServeSkipY
         cmp #2
         beq ServeSkipX
-        lda #BALL_SKIP_NONE      ; 0 ou 3 -> 45 graus
+        lda #BALL_SKIP_NONE      ; 0 or 3 -> 45 degrees
         jmp ServeSkipDone
 ServeSkipY
         lda #BALL_SKIP_Y
@@ -817,7 +720,7 @@ ServeSkipX
 ServeSkipDone
         sta BallSkipMode
 
-        ; bit 0 de RandomSeed decide o sinal de BallDX (magnitude sempre
+        ; RandomSeed bit 0 picks BallDX's sign (magnitude always
         ; BALL_SERVE_SPEED)
         lda RandomSeed
         lsr
@@ -827,7 +730,7 @@ ServeSkipDone
 RandDXStore
         sta BallDX
 
-        ; bit 1 de RandomSeed decide o sinal de BallDY
+        ; RandomSeed bit 1 picks BallDY's sign
         lda RandomSeed
         lsr
         lsr
