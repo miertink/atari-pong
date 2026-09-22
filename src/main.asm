@@ -51,12 +51,12 @@
         include "macro.h"
 
 ; ---- Geometry / color constants ----
-PADDLE_HT      = 32             ; ORIGINAL paddle height, in scanlines. This
-                                 ; stays a fixed constant (used for
-                                 ; PADDLE_Y_MAX's conservative, worst-case
-                                 ; clamp below) — the CURRENT height is a
-                                 ; runtime value, PaddleHt (RAM), which the
-                                 ; GAME RESET switch cycles through
+PADDLE_HT      = 32             ; ORIGINAL (full-size) paddle height, in
+                                 ; scanlines — used only as PaddleHtTable's
+                                 ; stage-0 entry and PaddleHt's initial
+                                 ; value in Reset. The CURRENT height is
+                                 ; the runtime value PaddleHt (RAM), which
+                                 ; the GAME RESET switch cycles through
                                  ; PaddleHtTable (see the difficulty note
                                  ; further down and AdvancePaddleDifficulty).
 PADDLE_PATTERN = %00111100      ; paddle bit pattern (GRP0/GRP1)
@@ -70,14 +70,11 @@ WALL_HT        = 8              ; top/bottom wall thickness, in scanlines
 PADDLE_Y_MIN   = WALL_HT+SCORE_HT  ; lowest valid P0Y/P1Y — paddles can't
                                  ; reach into the top wall or the score row
                                  ; (both come before the play area — see
-                                 ; the visible-area zone order in MainLoop)
-PADDLE_Y_MAX   = 192-WALL_HT-PADDLE_HT  ; highest valid P0Y/P1Y — paddle's
-                                 ; bottom edge stops at the bottom wall's
-                                 ; top face, doesn't overlap it (mirrors
-                                 ; PADDLE_Y_MIN's exclusion at the top;
-                                 ; missing this let the full-size paddle
-                                 ; stick into the wall band, reported by
-                                 ; the user)
+                                 ; the visible-area zone order in MainLoop).
+                                 ; Independent of paddle height (only the
+                                 ; TOP edge matters here), so this one stays
+                                 ; a fixed constant, unlike PaddleYMax below.
+COURT_BOTTOM   = 192-WALL_HT    ; first line of the bottom wall band
 BALL_HT        = 4              ; ball height, in scanlines
 BALL_SIZE      = %00100000      ; CTRLPF: ball width = 4 color clocks
 COLOR_WHITE    = $0E
@@ -221,6 +218,10 @@ HitsSinceLevelUp ds 1           ; 0..HITS_PER_LEVEL-1, counts toward the
 PaddleHt ds 1                   ; CURRENT paddle height (RAM) — looked up
                                  ; from PaddleHtTable[PaddleDifficultyStage],
                                  ; cycled by the GAME RESET switch
+PaddleYMax ds 1                 ; COURT_BOTTOM-PaddleHt, recomputed whenever
+                                 ; PaddleHt changes — highest valid P0Y/P1Y
+                                 ; for the CURRENT size, so a smaller paddle
+                                 ; can use the room a bigger one couldn't
 PaddleDifficultyStage ds 1      ; 0..PADDLE_DIFFICULTY_STAGES-1
 PrevResetState ds 1             ; last frame's GAME RESET switch bit, for
                                  ; edge detection
@@ -247,6 +248,7 @@ Reset
         sta PaddleDifficultyStage
         lda #PADDLE_HT           ; full size (stage 0) to start
         sta PaddleHt
+        jsr RecomputePaddleYMax
 
         lda #P0_Y_INIT
         sta P0Y
@@ -343,9 +345,10 @@ SkipP0Up
         lda P0Y
         clc
         adc #PADDLE_SPEED
-        cmp #PADDLE_Y_MAX+1
+        cmp PaddleYMax
+        beq P0DownOk
         bcc P0DownOk
-        lda #PADDLE_Y_MAX
+        lda PaddleYMax
 P0DownOk
         sta P0Y
         lda #1
@@ -379,9 +382,10 @@ SkipP1Up
         lda P1Y
         clc
         adc #PADDLE_SPEED
-        cmp #PADDLE_Y_MAX+1
+        cmp PaddleYMax
+        beq P1DownOk
         bcc P1DownOk
-        lda #PADDLE_Y_MAX
+        lda PaddleYMax
 P1DownOk
         sta P1Y
         lda #1
@@ -998,7 +1002,22 @@ NoStageWrap
         ldx PaddleDifficultyStage
         lda PaddleHtTable,x
         sta PaddleHt
+        jsr RecomputePaddleYMax
 NoResetEdge
+        rts
+
+; ---------------------------------------------------------------------------
+; RecomputePaddleYMax - sets PaddleYMax = COURT_BOTTOM - PaddleHt: the
+; highest P0Y/P1Y that keeps the CURRENT-size paddle's bottom edge from
+; overlapping the bottom wall. Called once at Reset and again whenever
+; PaddleHt changes (AdvancePaddleDifficulty), not every frame — it doesn't
+; change on its own between those events.
+; ---------------------------------------------------------------------------
+RecomputePaddleYMax
+        lda #COURT_BOTTOM
+        sec
+        sbc PaddleHt
+        sta PaddleYMax
         rts
 
 ; ---------------------------------------------------------------------------
