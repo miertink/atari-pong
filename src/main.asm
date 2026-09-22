@@ -48,6 +48,9 @@
 PADDLE_HT      = 32             ; paddle height, in scanlines
 PADDLE_PATTERN = %00111100      ; paddle bit pattern (GRP0/GRP1)
 PADDLE_SPEED   = 3              ; scanlines/frame while holding the joystick
+SCORE_HT       = 5              ; score row height, in scanlines (see below)
+PADDLE_Y_MIN   = SCORE_HT        ; lowest valid P0Y/P1Y — paddles can't reach
+                                 ; into the score row at the very top
 PADDLE_Y_MAX   = 192-PADDLE_HT  ; highest valid P0Y/P1Y (bottom = line 191)
 WALL_HT        = 8              ; top/bottom wall thickness, in scanlines
 BALL_HT        = 4              ; ball height, in scanlines
@@ -59,7 +62,7 @@ COLOR_WHITE    = $0E
 ; see engineering notes above.
 BALL_X_MIN     = 2
 BALL_X_MAX     = 158
-BALL_Y_MIN     = WALL_HT              ; bounces off the wall's inner face,
+BALL_Y_MIN     = SCORE_HT+WALL_HT     ; bounces off the wall's inner face,
 BALL_Y_MAX     = 192-WALL_HT-BALL_HT  ; not the screen's absolute edge
 
 ; Ball speed: slow at serve, one step up to rally speed on the first
@@ -89,11 +92,25 @@ SOUND_HIT_VOL  = 12              ; AUDV0: volume (0-15)
 SOUND_HIT_LEN  = 4               ; beep duration, in frames
 
 ; Score sound: lower and longer than the hit beep, so the two are
-; distinguishable even with no on-screen scoreboard yet.
+; distinguishable from each other.
 SOUND_SCORE_TONE = 12            ; AUDC0: div-6 pure tone (lower pitch)
 SOUND_SCORE_FREQ = 20
 SOUND_SCORE_VOL  = 12
 SOUND_SCORE_LEN  = 15
+
+; On-screen score: P0/P1 (the only two objects available) draw the digits,
+; so they can't also be showing the paddles on those same lines. Solved the
+; classic Pong way — a dedicated SCORE_HT-line row at the very top of the
+; frame, before the wall/play zones, where paddles never appear (clamped
+; via PADDLE_Y_MIN above). DigitFont holds 10 digits x SCORE_HT bytes each
+; (0-9), one byte per row, pattern centered in the byte the same way
+; PADDLE_PATTERN is (bits 5-2) — same safe horizontal margin already
+; validated for the paddles at P0_X/P1_X.
+;
+; SCORE_TO_WIN resets both scores to 0 once reached — not just a nicety:
+; without a cap, a long session could push a score past 9 and index off
+; the end of DigitFont, corrupting the display.
+SCORE_TO_WIN   = 5
 
 P0_X           = 4              ; left paddle's fixed horizontal position
 P1_X           = 140            ; right paddle's fixed horizontal position
@@ -116,8 +133,8 @@ BallDX  ds 1                    ; horizontal speed: +-BALL_SERVE_SPEED or
                                  ; +-BALL_RALLY_SPEED (+-BALL_SPIN on BallDY)
 BallDY  ds 1                    ; vertical speed, same scale as BallDX
 SoundTimer ds 1                 ; frames left on the current beep (0 = silent)
-ScoreP0 ds 1                    ; left player's score (no on-screen display
-ScoreP1 ds 1                    ; yet — see header)
+ScoreP0 ds 1                    ; left player's score (0-9, capped/reset at
+ScoreP1 ds 1                    ; SCORE_TO_WIN)
 RandomSeed ds 1                 ; LFSR state (must never be 0 — see AdvanceRandom)
 P0Dir   ds 1                    ; this frame's paddle direction: -1 (up),
 P1Dir   ds 1                    ; 0 (still), +1 (down) — used for ball English
@@ -126,6 +143,8 @@ BallSkipMode ds 1                ; BALL_SKIP_NONE/Y/X — which axis (if any)
                                  ; Reset to BALL_SKIP_NONE on the first
                                  ; paddle hit (rally only uses the spin
                                  ; effect).
+P0FontPtr ds 2                  ; pointer into DigitFont for this frame's
+P1FontPtr ds 2                  ; score row (computed once, read per line)
 
         SEG code
         ORG $F000
@@ -217,8 +236,9 @@ MainLoop
         lda P0Y
         sec
         sbc #PADDLE_SPEED
+        cmp #PADDLE_Y_MIN
         bcs P0UpOk
-        lda #0
+        lda #PADDLE_Y_MIN
 P0UpOk
         sta P0Y
         lda #-1
@@ -252,8 +272,9 @@ SkipP0Down
         lda P1Y
         sec
         sbc #PADDLE_SPEED
+        cmp #PADDLE_Y_MIN
         bcs P1UpOk
-        lda #0
+        lda #PADDLE_Y_MIN
 P1UpOk
         sta P1Y
         lda #-1
@@ -327,6 +348,13 @@ SkipMoveY
         cmp #BALL_X_MIN+1
         bcs NoScoreP1            ; BallX > BALL_X_MIN, not there yet
         inc ScoreP1              ; ball passed the left paddle -> right player scores
+        lda ScoreP1
+        cmp #SCORE_TO_WIN
+        bne SkipWinP1
+        lda #0                   ; match point reached -> new game
+        sta ScoreP0
+        sta ScoreP1
+SkipWinP1
         jsr StartScoreSound
         jsr ResetBall
         jmp BallMoveDone
@@ -335,6 +363,13 @@ NoScoreP1
         cmp #BALL_X_MAX
         bcc NoScoreP0            ; BallX < BALL_X_MAX, not there yet
         inc ScoreP0              ; ball passed the right paddle -> left player scores
+        lda ScoreP0
+        cmp #SCORE_TO_WIN
+        bne SkipWinP0
+        lda #0
+        sta ScoreP0
+        sta ScoreP1
+SkipWinP0
         jsr StartScoreSound
         jsr ResetBall
         jmp BallMoveDone
@@ -380,22 +415,63 @@ BallMoveDone
         lda #0
         sta VBLANK
 
-        ; --- Visible area: 192 lines, in 3 zones (top wall / middle /
-        ; bottom wall). The walls are just background color (COLUBK), not
-        ; real objects — no hardware collision with the ball (bouncing
-        ; near them is handled via BALL_Y_MIN/MAX in the VBLANK move block).
+        ; --- Visible area: 192 lines, in 4 zones (score row / top wall /
+        ; middle / bottom wall). The walls are just background color
+        ; (COLUBK), not real objects — no hardware collision with the ball
+        ; (bouncing near them is handled via BALL_Y_MIN/MAX in the VBLANK
+        ; move block).
         ;
-        ; Why 3 zones instead of checking "is this a wall line?" inside a
-        ; single loop: that costs ~15-17 extra cycles per line, blowing
-        ; the 76-cycle/scanline budget on top of paddles+ball (~61). With
-        ; 3 zones, the background color is set once per zone (outside the
-        ; loop), and each loop body stays identical to before (~61
-        ; cycles), just tripled in source.
+        ; Why separate zones instead of checking "which zone is this line
+        ; in?" inside a single loop: that costs extra cycles per line,
+        ; blowing the 76-cycle/scanline budget on top of paddles+ball
+        ; (~61, already tight). Each zone fixes its own per-line behavior
+        ; once, outside its loop, and the shared body (~61 cycles) stays
+        ; unchanged, just repeated in source.
         inc Frame
+
+        ; --- score row: SCORE_HT lines, P0/P1 draw digits instead of
+        ; paddles. Font pointers computed once here (score*SCORE_HT +
+        ; table base), then just indexed by row inside the loop.
+        lda ScoreP0
+        asl
+        asl
+        clc
+        adc ScoreP0              ; A = ScoreP0*5 (SCORE_HT)
+        clc
+        adc #<DigitFont
+        sta P0FontPtr
+        lda #>DigitFont
+        adc #0
+        sta P0FontPtr+1
+
+        lda ScoreP1
+        asl
+        asl
+        clc
+        adc ScoreP1
+        clc
+        adc #<DigitFont
+        sta P1FontPtr
+        lda #>DigitFont
+        adc #0
+        sta P1FontPtr+1
+
+        lda #0
+        sta COLUBK
+        ldy #0
+ScoreLoop
+        lda (P0FontPtr),y
+        sta GRP0
+        lda (P1FontPtr),y
+        sta GRP1
+        sta WSYNC
+        iny
+        cpy #SCORE_HT
+        bne ScoreLoop
 
         lda #COLOR_WHITE
         sta COLUBK
-        ldx #0
+        ldx #SCORE_HT
 TopWallLoop
         lda #0
         cpx P0Y
@@ -426,7 +502,7 @@ SkipTBall
 
         sta WSYNC
         inx
-        cpx #WALL_HT
+        cpx #SCORE_HT+WALL_HT
         bne TopWallLoop
 
         lda #0
@@ -575,6 +651,28 @@ OverscanLoop
         bne OverscanLoop
 
         jmp MainLoop
+
+; ---------------------------------------------------------------------------
+; DigitFont - 10 digits (0-9) x SCORE_HT(5) bytes, one byte per scanline row,
+; top row first. Each byte's pattern is centered in bits 5-2, the same
+; alignment as PADDLE_PATTERN, so the digits sit at the same safe
+; horizontal margin already validated for the paddles at P0_X/P1_X.
+; Derived from standard 7-segment digit shapes (not copied from an
+; unverified reference), so its correctness can be checked by hand:
+; segments a(top)/b(upper-right)/c(lower-right)/d(bottom)/e(lower-left)/
+; f(upper-left)/g(middle) map to rows top,upper,middle,lower,bottom.
+; ---------------------------------------------------------------------------
+DigitFont
+        .byte $3C,$24,$00,$24,$3C  ; 0
+        .byte $00,$04,$00,$04,$00  ; 1
+        .byte $3C,$04,$3C,$20,$3C  ; 2
+        .byte $3C,$04,$3C,$04,$3C  ; 3
+        .byte $00,$24,$3C,$04,$00  ; 4
+        .byte $3C,$20,$3C,$04,$3C  ; 5
+        .byte $3C,$20,$3C,$24,$3C  ; 6
+        .byte $3C,$04,$00,$04,$00  ; 7
+        .byte $3C,$24,$3C,$24,$3C  ; 8
+        .byte $3C,$24,$3C,$04,$3C  ; 9
 
 ; ---------------------------------------------------------------------------
 ; SetHorizPos - horizontally positions a TIA object.
