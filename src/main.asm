@@ -21,7 +21,9 @@ PADDLE_PATTERN = %00111100      ; padrao de bits da raquete (GRP0/GRP1)
 BALL_SIZE      = %00010000      ; CTRLPF: bola com 2 color clocks de largura
 COLOR_WHITE    = $0E
 
-P0_X           = 16             ; posicao horizontal fixa da raquete esquerda
+P0_X           = 4              ; posicao horizontal fixa da raquete esquerda
+                                 ; (ajustado: 3x a largura da raquete a menos
+                                 ; que os 16 originais, a pedido do usuario)
 P1_X           = 140            ; posicao horizontal fixa da raquete direita
 BALL_X_INIT    = 80             ; posicao horizontal inicial da bola (centro)
 P0_Y_INIT      = 88             ; topo da raquete esquerda (linha 0-191)
