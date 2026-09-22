@@ -51,7 +51,14 @@
         include "macro.h"
 
 ; ---- Geometry / color constants ----
-PADDLE_HT      = 32             ; paddle height, in scanlines
+PADDLE_HT      = 32             ; ORIGINAL paddle height, in scanlines. This
+                                 ; stays a fixed constant (used for
+                                 ; PADDLE_Y_MAX's conservative, worst-case
+                                 ; clamp below) — the CURRENT height is a
+                                 ; runtime value, PaddleHt (RAM), which the
+                                 ; GAME RESET switch cycles through
+                                 ; PaddleHtTable (see the difficulty note
+                                 ; further down and AdvancePaddleDifficulty).
 PADDLE_PATTERN = %00111100      ; paddle bit pattern (GRP0/GRP1)
 PADDLE_SPEED   = 3              ; scanlines/frame while holding the joystick
 FONT_ROWS      = 5              ; DigitFont height, in raw font rows
@@ -82,16 +89,25 @@ BALL_Y_MAX     = 192-WALL_HT-BALL_HT  ; not the screen's absolute edge
 BALL_SERVE_SPEED = 1
 BALL_RALLY_SPEED = 2
 
-; Rally speed then creeps up: +10% every HITS_PER_LEVEL paddle hits (across
-; the whole match, not reset per point — only on a match win). With
-; PADDLE_SPEED=3 and rally speed starting at 2, there is NO integer value
-; strictly between them — compounding 2.0 -> 2.2 -> 2.42 -> 2.66 (rounds
-; to 3) reaches the paddle's own speed after 3 levels and has nowhere
-; left to go, so growth stops there (matches, never exceeds, the paddle).
-; LevelSpeedTable holds these hand-computed, pre-rounded values — no
-; runtime multiply/divide needed for something this small.
+; Rally speed then creeps up: +10% every HITS_PER_LEVEL paddle hits within
+; the current rally, reset back to level 0 on every point (see ResetBall).
+; With PADDLE_SPEED=3 and rally speed starting at 2, there is NO integer
+; value strictly between them — compounding 2.0 -> 2.2 -> 2.42 -> 2.66
+; (rounds to 3) reaches the paddle's own speed after 3 levels and has
+; nowhere left to go, so growth stops there (matches, never exceeds, the
+; paddle). LevelSpeedTable holds these hand-computed, pre-rounded values —
+; no runtime multiply/divide needed for something this small.
 HITS_PER_LEVEL = 10
 MAX_HIT_LEVEL  = 3              ; LevelSpeedTable has MAX_HIT_LEVEL+1 entries
+
+; Difficulty: the GAME RESET console switch (SWCHB bit 0, active low —
+; doesn't force a real 6502 reset, it's just another software-readable
+; switch) cycles the paddle height through 3 stages on each press: full
+; size -> 3/4 -> 2/3 -> back to full. PaddleHtTable holds the 3 heights
+; (2/3 of 32 rounds to 21). Detected by edge (comparing this frame's
+; switch state to last frame's in PrevResetState), so holding the button
+; down doesn't rapid-cycle through stages every frame.
+PADDLE_DIFFICULTY_STAGES = 3
 
 ; Serve angle: 3 profiles, picked by FREQUENCY (which axis, if any, skips
 ; odd frames) rather than by step magnitude — magnitude-based profiles
@@ -194,7 +210,14 @@ P0FontPtr ds 2                  ; pointer into DigitFont for this frame's
 P1FontPtr ds 2                  ; score row (computed once, read per line)
 HitLevel ds 1                   ; 0..MAX_HIT_LEVEL — indexes LevelSpeedTable
 HitsSinceLevelUp ds 1           ; 0..HITS_PER_LEVEL-1, counts toward the
-                                 ; next level. Both reset to 0 on a match win.
+                                 ; next level. Both reset to 0 in ResetBall
+                                 ; (every point, not just a match win).
+PaddleHt ds 1                   ; CURRENT paddle height (RAM) — looked up
+                                 ; from PaddleHtTable[PaddleDifficultyStage],
+                                 ; cycled by the GAME RESET switch
+PaddleDifficultyStage ds 1      ; 0..PADDLE_DIFFICULTY_STAGES-1
+PrevResetState ds 1             ; last frame's GAME RESET switch bit, for
+                                 ; edge detection
 
         SEG code
         ORG $F000
@@ -214,16 +237,21 @@ Reset
         lda #NUSIZ0_PLAY         ; missile-0 (net) width; player width stays
         sta NUSIZ0               ; normal until the score row overrides it
 
+        lda #0
+        sta PaddleDifficultyStage
+        lda #PADDLE_HT           ; full size (stage 0) to start
+        sta PaddleHt
+
         lda #P0_Y_INIT
         sta P0Y
         clc
-        adc #PADDLE_HT
+        adc PaddleHt
         sta P0YEnd
 
         lda #P1_Y_INIT
         sta P1Y
         clc
-        adc #PADDLE_HT
+        adc PaddleHt
         sta P1YEnd
 
         ; PRNG seed (must never be 0 — see AdvanceRandom). The exact value
@@ -281,6 +309,9 @@ MainLoop
                                  ; LFSR "spinning" independent of gameplay,
                                  ; so it looks random whenever a serve happens
 
+        jsr AdvancePaddleDifficulty  ; before the paddles move, so a size
+                                 ; change (if any) takes effect this frame
+
         ; --- move paddle P0 (joystick 0 = left port: bit4=Up, bit5=Down) ---
         ; P0Dir records this frame's direction (-1/0/+1), used for ball
         ; English if a collision happens in this same window.
@@ -316,7 +347,7 @@ P0DownOk
 SkipP0Down
         lda P0Y
         clc
-        adc #PADDLE_HT
+        adc PaddleHt
         sta P0YEnd
 
         ; --- move paddle P1 (joystick 1 = right port: bit0=Up, bit1=Down) ---
@@ -352,7 +383,7 @@ P1DownOk
 SkipP1Down
         lda P1Y
         clc
-        adc #PADDLE_HT
+        adc PaddleHt
         sta P1YEnd
 
         ; --- move the ball: vertical bounce (top/bottom) ---
@@ -767,6 +798,15 @@ LevelSpeedTable
         .byte 2,2,2,3
 
 ; ---------------------------------------------------------------------------
+; PaddleHtTable - paddle height at each PaddleDifficultyStage (0..
+; PADDLE_DIFFICULTY_STAGES-1), cycled by the GAME RESET switch (see
+; AdvancePaddleDifficulty): full PADDLE_HT(32), then 3/4 (24, exact),
+; then 2/3 (32*2/3 = 21.33, rounded to 21).
+; ---------------------------------------------------------------------------
+PaddleHtTable
+        .byte PADDLE_HT, (PADDLE_HT*3)/4, 21
+
+; ---------------------------------------------------------------------------
 ; DigitFont - 10 digits (0-9) x FONT_ROWS(5) bytes, one byte per font row
 ; (each drawn SCORE_SCALE scanlines tall on screen — see ScoreRowLoop),
 ; top row first. Each byte's pattern is centered in bits 5-2, the same
@@ -921,6 +961,38 @@ AdvanceRandom
         eor #$B4
 NoRandomTap
         sta RandomSeed
+        rts
+
+; ---------------------------------------------------------------------------
+; AdvancePaddleDifficulty - reads the GAME RESET console switch (SWCHB bit
+; 0, active low) and, on a fresh press (edge from released to pressed, not
+; just "currently pressed" — otherwise holding it down would cycle through
+; stages every single frame), advances PaddleDifficultyStage and looks up
+; the new PaddleHt from PaddleHtTable. Called once per frame, before the
+; paddles move (see VBLANK), so a change applies the same frame it's
+; detected.
+; ---------------------------------------------------------------------------
+AdvancePaddleDifficulty
+        lda SWCHB
+        and #%00000001           ; isolate the GAME RESET bit (0 = pressed)
+        tax
+        cpx PrevResetState
+        beq NoResetEdge          ; unchanged since last frame, nothing to do
+        stx PrevResetState
+        cpx #0
+        bne NoResetEdge          ; new state is 1 (released) — a release
+                                 ; edge, not a press; ignore it
+        inc PaddleDifficultyStage
+        lda PaddleDifficultyStage
+        cmp #PADDLE_DIFFICULTY_STAGES
+        bne NoStageWrap
+        lda #0
+        sta PaddleDifficultyStage
+NoStageWrap
+        ldx PaddleDifficultyStage
+        lda PaddleHtTable,x
+        sta PaddleHt
+NoResetEdge
         rts
 
 ; ---------------------------------------------------------------------------
