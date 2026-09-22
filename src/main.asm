@@ -71,7 +71,13 @@ PADDLE_Y_MIN   = WALL_HT+SCORE_HT  ; lowest valid P0Y/P1Y — paddles can't
                                  ; reach into the top wall or the score row
                                  ; (both come before the play area — see
                                  ; the visible-area zone order in MainLoop)
-PADDLE_Y_MAX   = 192-PADDLE_HT  ; highest valid P0Y/P1Y (bottom = line 191)
+PADDLE_Y_MAX   = 192-WALL_HT-PADDLE_HT  ; highest valid P0Y/P1Y — paddle's
+                                 ; bottom edge stops at the bottom wall's
+                                 ; top face, doesn't overlap it (mirrors
+                                 ; PADDLE_Y_MIN's exclusion at the top;
+                                 ; missing this let the full-size paddle
+                                 ; stick into the wall band, reported by
+                                 ; the user)
 BALL_HT        = 4              ; ball height, in scanlines
 BALL_SIZE      = %00100000      ; CTRLPF: ball width = 4 color clocks
 COLOR_WHITE    = $0E
@@ -819,7 +825,7 @@ PaddleHtTable
 ; ---------------------------------------------------------------------------
 DigitFont
         .byte $3C,$24,$00,$24,$3C  ; 0
-        .byte $00,$04,$00,$04,$00  ; 1
+        .byte $00,$04,$04,$04,$00  ; 1
         .byte $3C,$04,$3C,$20,$3C  ; 2
         .byte $3C,$04,$3C,$04,$3C  ; 3
         .byte $00,$24,$3C,$04,$00  ; 4
