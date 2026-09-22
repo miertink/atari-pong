@@ -245,7 +245,18 @@ Consulta rápida para não sair do repositório.
         Diagnóstico usado: piscar o fundo da tela com o contador de frame e
         depois com o valor de `BallX` em RAM, para isolar timing global vs.
         aritmética vs. posicionamento na tela antes de mexer em código.
-  - [ ] Incremento 4 — colisão bola↔raquete (hardware, `CXP0FB`/`CXP1FB`) + bip.
+  - [x] **Incremento 4 — colisão bola↔raquete (hardware) + bip:** implementado
+        e validado em 2026-09-22. `CXP0FB`/`CXP1FB` (bit 6) detectam a
+        colisão — a própria TIA calcula durante o desenho da área visível,
+        sem comparar coordenadas na mão; `CXCLR` limpa os latches (são
+        *sticky*) a cada frame. Ao colidir, `BallDX` inverte na direção
+        certa e toca um bip curto (`AUDC0/AUDF0/AUDV0`, ~4 frames).
+        Ajustes de jogabilidade feitos junto: som trocado de `AUDC0=8`
+        ("9-bit poly" = ruído branco, não um tom) para `AUDC0=4` ("pure
+        tone"); `PADDLE_SPEED` 2→3 (bola precisava ficar ≥1/3 mais lenta
+        que a raquete — antes as duas tinham a mesma velocidade);
+        `PADDLE_HT` 16→32 (raquete maior, melhor jogabilidade;
+        `P0_Y_INIT`/`P1_Y_INIT` recalculados para manter centralizada).
   - [ ] Incremento 5 — paredes topo/base (reintroduzir, com orçamento de
         ciclos ok) e detecção de ponto (bola passa da raquete, substituindo
         o quique lateral provisório do Incremento 3).
