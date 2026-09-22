@@ -11,10 +11,12 @@
 ;     quique/ponto por desigualdade (nao igualdade exata) — robusta a
 ;     qualquer velocidade, sem exigir paridade combinada entre posicao/
 ;     velocidade/limites (lição da fragilidade anterior, ver constantes).
-;   - Saque com direcao aleatoria (LFSR de 8 bits, AdvanceRandom) — nao
-;     sempre pro mesmo lado como antes. Rebatida na raquete ganha "efeito":
-;     se a raquete estava em movimento no instante da colisao, o angulo
-;     vertical da bola fecha ou abre na mesma direcao (P0Dir/P1Dir).
+;   - Saque com direcao E angulo aleatorios (LFSR de 8 bits, AdvanceRandom):
+;     3 perfis de angulo (raso/medio/ingreme) x 4 quadrantes de direcao =
+;     ate 12 trajetorias de saque possiveis, nao sempre a mesma como antes.
+;     Rebatida na raquete ganha "efeito": se a raquete estava em movimento
+;     no instante da colisao, o angulo vertical da bola fecha ou abre na
+;     mesma direcao (P0Dir/P1Dir).
 ;   - Placar (ScoreP0/ScoreP1) contado em RAM, sem exibicao visual ainda —
 ;     digitos na tela ficam para depois do Marco 0 (ja previsto no README).
 ;
