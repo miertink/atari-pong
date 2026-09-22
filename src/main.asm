@@ -5,7 +5,12 @@
 ;     definida uma unica vez no Reset.
 ;   - BL (bola): se move, quica no topo/base (paredes visuais reintroduzidas
 ;     no Incremento 5), colide com as raquetes (hardware) e soma ponto pro
-;     adversario quando passa reto por uma raquete.
+;     adversario quando passa reto por uma raquete. Velocidade em 2 fases:
+;     BALL_SERVE_SPEED no saque, acelera (um unico degrau, nao continuo)
+;     pra BALL_RALLY_SPEED na primeira colisao com raquete. Deteccao de
+;     quique/ponto por desigualdade (nao igualdade exata) — robusta a
+;     qualquer velocidade, sem exigir paridade combinada entre posicao/
+;     velocidade/limites (lição da fragilidade anterior, ver constantes).
 ;   - Placar (ScoreP0/ScoreP1) contado em RAM, sem exibicao visual ainda —
 ;     digitos na tela ficam para depois do Marco 0 (ja previsto no README).
 ;
@@ -82,28 +87,32 @@ BALL_SIZE      = %00100000      ; CTRLPF: bola com 4 color clocks de largura
                                  ; estreita e mais alta, a pedido do usuario)
 COLOR_WHITE    = $0E
 
-; limites de quique da bola (0-159 horizontal, mesma escala usada por
-; SetHorizPos; verticais em linhas de scanline, 0-191). A deteccao de
-; quique compara IGUALDADE EXATA com esses limites (nao "<=") — por isso
-; eles precisam ter a mesma paridade de BALL_X_INIT/BALL_Y_INIT e serem
-; alcancaveis em passos de BALL_SPEED, senao a bola pula por cima do
-; limite sem nunca bater exatamente nele. Com BALL_X_INIT=80 (par) e
-; BALL_SPEED=2 (par), a posicao da bola e sempre par — por isso os limites
-; abaixo tambem sao pares. Se mudar BALL_SPEED/BALL_X_INIT/BALL_Y_INIT,
-; conferir essa paridade de novo (ou trocar por comparacao "<=").
+; limites de quique/ponto da bola (0-159 horizontal, mesma escala usada por
+; SetHorizPos; verticais em linhas de scanline, 0-191). A deteccao compara
+; POR DESIGUALDADE (">="/"<="), nao igualdade exata — funciona pra
+; qualquer velocidade, mesmo se BallDX/BallDY mudar de valor durante o
+; jogo (ver BALL_SERVE_SPEED/BALL_RALLY_SPEED abaixo), sem exigir que a
+; bola "acerte" o limite exatamente. (Versao anterior comparava igualdade
+; exata e exigia paridade combinada entre posicao inicial/velocidade/
+; limites — funcionava, mas quebrava toda vez que a velocidade mudava;
+; a checagem por desigualdade elimina essa fragilidade de vez.)
 BALL_X_MIN     = 2
 BALL_X_MAX     = 158
 BALL_Y_MIN     = WALL_HT              ; quica na face interna da parede,
 BALL_Y_MAX     = 192-WALL_HT-BALL_HT  ; nao no limite absoluto da tela
-BALL_SPEED     = 2              ; pixels/frame em cada eixo. Teste: 1px/frame
-                                 ; parecia "aos saltos" em monitor/emulador
-                                 ; (sem persistencia de fosforo de um CRT).
-                                 ; Usado tanto na velocidade inicial quanto
-                                 ; nos quiques (ver blocos abaixo) — nao
-                                 ; mexer so na constante inicial, tem que
-                                 ; trocar os dois em conjunto.
-BALL_DX_INIT   = BALL_SPEED
-BALL_DY_INIT   = BALL_SPEED
+
+; Velocidade da bola tem duas fases: comeca devagar no saque (antes da
+; primeira raquetada) e acelera UMA VEZ, na primeira colisao com raquete,
+; ficando constante dali em diante (nao e aceleracao continua — a regra de
+; "sem aceleracao" continua valendo durante o rally; e so um degrau no
+; primeiro toque, pedido pelo usuario). Serve < Rally < Paddle:
+; BALL_SERVE_SPEED(1) -> BALL_RALLY_SPEED(2): 50% mais lento no saque.
+; BALL_RALLY_SPEED(2) vs PADDLE_SPEED(3): bola 33% mais lenta que raquete
+; durante o rally (regra definida antes).
+BALL_SERVE_SPEED = 1
+BALL_RALLY_SPEED = 2
+BALL_DX_INIT   = BALL_SERVE_SPEED
+BALL_DY_INIT   = BALL_SERVE_SPEED
 
 ; colisao bola<->raquete (hardware CXP0FB/CXP1FB, bit 6 = colisao com a bola;
 ; bit 7 seria colisao com playfield, nao usado aqui) + bip curto
@@ -294,21 +303,25 @@ SkipP1Down
         sta P1YEnd
 
         ; --- move a bola: quique vertical (topo/base) ---
+        ; Deteccao por desigualdade (BallY <= MIN / >= MAX), nao igualdade
+        ; exata — ver nota nas constantes. Ao quicar, INVERTE O SINAL de
+        ; BallDY preservando a magnitude atual (NormalizeSignBallDY), em
+        ; vez de escrever uma constante fixa — a velocidade pode ser
+        ; BALL_SERVE_SPEED ou BALL_RALLY_SPEED dependendo se a bola ja foi
+        ; rebatida ou nao, e o quique nao deve alterar isso.
         lda BallY
-        cmp #BALL_Y_MIN
-        bne NoTopBounce
+        cmp #BALL_Y_MIN+1
+        bcs NoTopBounce          ; BallY > BALL_Y_MIN, ainda nao chegou la
         lda BallDY
         bpl NoTopBounce          ; ja indo pra baixo (>=0), nada a fazer
-        lda #BALL_SPEED
-        sta BallDY
+        jsr NegateBallDY
 NoTopBounce
         lda BallY
         cmp #BALL_Y_MAX
-        bne NoBottomBounce
+        bcc NoBottomBounce       ; BallY < BALL_Y_MAX, ainda nao chegou la
         lda BallDY
         bmi NoBottomBounce       ; ja indo pra cima (<0), nada a fazer
-        lda #-BALL_SPEED
-        sta BallDY
+        jsr NegateBallDY
 NoBottomBounce
         lda BallY
         clc
@@ -319,13 +332,13 @@ NoBottomBounce
         sta BallYEnd
 
         ; --- move a bola: horizontal — deteccao de ponto ---
-        ; Se a bola chega a BALL_X_MIN/MAX, e porque passou pela raquete
-        ; sem colidir (colisao real ja teria invertido BallDX antes disso,
-        ; no bloco de colisao apos o kernel visivel). Substitui o quique
-        ; lateral placeholder do Incremento 3.
+        ; Se a bola chega a (ou passa de) BALL_X_MIN/MAX, e porque passou
+        ; pela raquete sem colidir (colisao real ja teria invertido BallDX
+        ; antes disso, no bloco de colisao apos o kernel visivel).
+        ; Deteccao por desigualdade, mesma logica do quique vertical.
         lda BallX
-        cmp #BALL_X_MIN
-        bne NoScoreP1
+        cmp #BALL_X_MIN+1
+        bcs NoScoreP1            ; BallX > BALL_X_MIN, ainda nao chegou la
         inc ScoreP1              ; bola passou pela raquete esquerda -> ponto do jogador da direita
         jsr StartScoreSound
         jsr ResetBall
@@ -333,7 +346,7 @@ NoBottomBounce
 NoScoreP1
         lda BallX
         cmp #BALL_X_MAX
-        bne NoScoreP0
+        bcc NoScoreP0            ; BallX < BALL_X_MAX, ainda nao chegou la
         inc ScoreP0              ; bola passou pela raquete direita -> ponto do jogador da esquerda
         jsr StartScoreSound
         jsr ResetBall
@@ -514,18 +527,27 @@ SkipBBall
         ; acabou de rodar; ler agora pega o resultado do frame inteiro.
         ; CXCLR no final limpa os latches pro proximo frame (sao "sticky",
         ; nao zeram sozinhos).
+        ; Ao colidir, a bola vai (ou continua) na velocidade de rally
+        ; (BALL_RALLY_SPEED) — na primeira colisao do saque, isso "acelera"
+        ; a bola de uma vez (BALL_SERVE_SPEED -> BALL_RALLY_SPEED); em
+        ; colisoes seguintes so reafirma o mesmo valor (nao ha aceleracao
+        ; continua). BallDY tambem tem sua magnitude ajustada pra
+        ; BALL_RALLY_SPEED, preservando o sinal (direcao vertical nao muda
+        ; por causa da colisao com raquete).
         lda CXP0FB
         and #COLLISION_BL
         beq NoHitP0
-        lda #BALL_SPEED          ; bateu na raquete esquerda -> bola vai pra direita
+        lda #BALL_RALLY_SPEED    ; bateu na raquete esquerda -> bola vai pra direita
         sta BallDX
+        jsr SetBallDYToRallySpeed
         jsr StartHitSound
 NoHitP0
         lda CXP1FB
         and #COLLISION_BL
         beq NoHitP1
-        lda #-BALL_SPEED         ; bateu na raquete direita -> bola vai pra esquerda
+        lda #-BALL_RALLY_SPEED   ; bateu na raquete direita -> bola vai pra esquerda
         sta BallDX
+        jsr SetBallDYToRallySpeed
         jsr StartHitSound
 NoHitP1
         sta CXCLR
@@ -607,8 +629,37 @@ StartScoreSound
         rts
 
 ; ---------------------------------------------------------------------------
-; ResetBall - devolve a bola ao centro da tela, com velocidade inicial, apos
-; um ponto marcado. Nao mexe em P0/P1 (raquetes ficam onde estavam).
+; NegateBallDY - inverte o sinal de BallDY preservando a magnitude atual
+; (BALL_SERVE_SPEED ou BALL_RALLY_SPEED, o que estiver valendo no momento).
+; Usado no quique vertical, onde so a DIRECAO muda, nunca a velocidade.
+; ---------------------------------------------------------------------------
+NegateBallDY
+        lda #0
+        sec
+        sbc BallDY               ; A = 0 - BallDY = -BallDY
+        sta BallDY
+        rts
+
+; ---------------------------------------------------------------------------
+; SetBallDYToRallySpeed - ajusta a MAGNITUDE de BallDY para BALL_RALLY_SPEED,
+; preservando o sinal atual (a direcao vertical nao muda por causa de uma
+; colisao com raquete, so a velocidade "acelera" pro valor de rally).
+; ---------------------------------------------------------------------------
+SetBallDYToRallySpeed
+        lda BallDY
+        bmi SetBallDYNegRally
+        lda #BALL_RALLY_SPEED
+        sta BallDY
+        rts
+SetBallDYNegRally
+        lda #-BALL_RALLY_SPEED
+        sta BallDY
+        rts
+
+; ---------------------------------------------------------------------------
+; ResetBall - devolve a bola ao centro da tela, com velocidade inicial de
+; saque (BALL_SERVE_SPEED), apos um ponto marcado. Nao mexe em P0/P1
+; (raquetes ficam onde estavam).
 ; ---------------------------------------------------------------------------
 ResetBall
         lda #BALL_X_INIT
