@@ -14,9 +14,11 @@
 ;     reach the paddle's own speed, so growth stops there (see the
 ;     constants note near HITS_PER_LEVEL). Serve direction and angle are
 ;     randomized (8-bit LFSR); a moving paddle at the moment of contact
-;     nudges the ball's vertical angle (English/spin).
+;     nudges the ball's vertical angle (English/spin). The speed
+;     progression resets on every point (ResetBall), not just a match
+;     win — each rally starts back at BALL_SERVE_SPEED.
 ;   - Score (ScoreP0/ScoreP1) shown on screen (DigitFont), reset to 0/0 on
-;     a match win (SCORE_TO_WIN) — which also resets the speed progression.
+;     a match win (SCORE_TO_WIN).
 ;
 ; Engineering notes worth keeping in mind when touching this code:
 ;
@@ -408,8 +410,6 @@ SkipMoveY
         lda #0                   ; match point reached -> new game
         sta ScoreP0
         sta ScoreP1
-        sta HitLevel             ; speed progression also resets with the match
-        sta HitsSinceLevelUp
 SkipWinP1
         jsr StartScoreSound
         jsr ResetBall
@@ -425,8 +425,6 @@ NoScoreP1
         lda #0
         sta ScoreP0
         sta ScoreP1
-        sta HitLevel
-        sta HitsSinceLevelUp
 SkipWinP0
         jsr StartScoreSound
         jsr ResetBall
@@ -928,7 +926,12 @@ NoRandomTap
 ; ---------------------------------------------------------------------------
 ; ResetBall - returns the ball to center screen with a random serve ANGLE
 ; AND DIRECTION (from RandomSeed bits), after a point or at Reset. Doesn't
-; touch P0/P1 (paddles stay where they were).
+; touch P0/P1 (paddles stay where they were). Also resets the speed
+; progression (HitLevel/HitsSinceLevelUp) — every new rally starts back at
+; BALL_SERVE_SPEED, not wherever the previous rally's hits had accelerated
+; to. This runs on every point, not just a match win: ResetBall is called
+; from both the regular score path and the match-win path, so a single
+; reset here covers both (no need to duplicate it at each call site).
 ;
 ; BallDX/BallDY always have FIXED magnitude (BALL_SERVE_SPEED) on both
 ; axes — the angle comes from BallSkipMode (RandomSeed bits 2-3), which
@@ -939,6 +942,10 @@ NoRandomTap
 ; trajectories.
 ; ---------------------------------------------------------------------------
 ResetBall
+        lda #0
+        sta HitLevel
+        sta HitsSinceLevelUp
+
         lda #BALL_X_INIT
         sta BallX
         lda #BALL_Y_INIT
