@@ -102,6 +102,14 @@ BALL_SPEED     = 2              ; pixels/frame em cada eixo. Teste: 1px/frame
 BALL_DX_INIT   = BALL_SPEED
 BALL_DY_INIT   = BALL_SPEED
 
+; colisao bola<->raquete (hardware CXP0FB/CXP1FB, bit 6 = colisao com a bola;
+; bit 7 seria colisao com playfield, nao usado aqui) + bip curto
+COLLISION_BL   = %01000000
+SOUND_HIT_TONE = 8              ; AUDC0: tom razoavelmente limpo
+SOUND_HIT_FREQ = 4              ; AUDF0: agudo (valor baixo = frequencia alta)
+SOUND_HIT_VOL  = 12             ; AUDV0: volume (0-15)
+SOUND_HIT_LEN  = 4              ; duracao do bip, em frames
+
 P0_X           = 4              ; posicao horizontal fixa da raquete esquerda
                                  ; (ajustado: 3x a largura da raquete a menos
                                  ; que os 16 originais, a pedido do usuario)
@@ -123,6 +131,7 @@ BallY   ds 1                    ; topo da bola
 BallYEnd ds 1                   ; BallY + BALL_HT (pre-calculado)
 BallDX  ds 1                    ; velocidade horizontal: +-BALL_SPEED
 BallDY  ds 1                    ; velocidade vertical: +-BALL_SPEED
+SoundTimer ds 1                 ; frames restantes do bip de colisao (0 = silencio)
 
         SEG code
         ORG $F000
@@ -394,6 +403,36 @@ SkipBall
         sta GRP1
         sta ENABL
 
+        ; --- colisao bola<->raquete (hardware) ---
+        ; CXP0FB/CXP1FB acumulam colisoes durante toda a area visivel que
+        ; acabou de rodar; ler agora pega o resultado do frame inteiro.
+        ; CXCLR no final limpa os latches pro proximo frame (sao "sticky",
+        ; nao zeram sozinhos).
+        lda CXP0FB
+        and #COLLISION_BL
+        beq NoHitP0
+        lda #BALL_SPEED          ; bateu na raquete esquerda -> bola vai pra direita
+        sta BallDX
+        jsr StartHitSound
+NoHitP0
+        lda CXP1FB
+        and #COLLISION_BL
+        beq NoHitP1
+        lda #-BALL_SPEED         ; bateu na raquete direita -> bola vai pra esquerda
+        sta BallDX
+        jsr StartHitSound
+NoHitP1
+        sta CXCLR
+
+        ; --- som: decrementa o timer do bip, silencia quando chega a 0 ---
+        lda SoundTimer
+        beq SoundDone
+        dec SoundTimer
+        bne SoundDone
+        lda #0
+        sta AUDV0
+SoundDone
+
         ; --- Overscan: 30 linhas ---
         lda #2
         sta VBLANK
@@ -427,6 +466,22 @@ DivideLoop
         asl
         sta HMP0,x
         sta RESP0,x
+        rts
+
+; ---------------------------------------------------------------------------
+; StartHitSound - inicia o bip de colisao (AUDC0/AUDF0/AUDV0 + SoundTimer).
+; O som e desligado automaticamente apos SOUND_HIT_LEN frames (ver bloco
+; "som" no MainLoop, que decrementa SoundTimer e zera AUDV0 quando chega a 0).
+; ---------------------------------------------------------------------------
+StartHitSound
+        lda #SOUND_HIT_TONE
+        sta AUDC0
+        lda #SOUND_HIT_FREQ
+        sta AUDF0
+        lda #SOUND_HIT_VOL
+        sta AUDV0
+        lda #SOUND_HIT_LEN
+        sta SoundTimer
         rts
 
         ORG $FFFC
