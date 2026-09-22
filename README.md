@@ -211,17 +211,40 @@ Consulta rápida para não sair do repositório.
         ajuste cosmético aplicado (raquete esquerda `P0_X` 16→4).
   - [x] **Incremento 2 — joystick move as raquetes:** validado em 2026-09-22.
         Três bugs reportados e corrigidos: (1) objeto deslocando ~1px ao
-        mexer no joystick — causa provável era HMOVE re-estrobado todo frame
-        sem necessidade; resíduo de ~1px aceito como particularidade do
-        emulador; (2) fragmento de raquete vazando para o topo da tela —
-        `GRP0/GRP1/ENABL` não eram zerados fora do kernel visível; (3) bola
-        sumindo com raquetes no topo — bola tinha só 1 scanline de altura,
-        aumentada para 2.
+        mexer no joystick — causa real identificada só no Incremento 3 (ver
+        abaixo): `HMCLR` estrobado cedo demais depois do `HMOVE`; residual
+        eliminado quando o mesmo fix foi aplicado ao `Reset`; (2) fragmento
+        de raquete vazando para o topo da tela — `GRP0/GRP1/ENABL` não eram
+        zerados fora do kernel visível; (3) bola sumindo com raquetes no
+        topo — bola tinha só 1 scanline de altura, aumentada.
   - [x] **Incremento 3 — bola se move e quica nas bordas:** implementado em
         2026-09-22. Quique real no topo/base; quique nas laterais por
         enquanto é placeholder (substituído pela colisão com raquete e
         detecção de ponto nos incrementos 4/5). Sem aceleração, conforme
         regra definida.
+        **Depuração de movimento "picotado"/"galopando" em vez de deslizar**
+        (a mais longa do projeto até aqui, várias hipóteses testadas e
+        descartadas com evidência antes de achar a causa real):
+        1. `SetHorizPos` tem custo variável (loop de "subtrai 15"); corrigido
+           trocando contagem manual de `WSYNC` por timer de hardware
+           (`TIMER_SETUP`/`TIMER_WAIT`) no VBLANK — real, mas não era a
+           causa principal do picotamento.
+        2. Regressão própria: `WSYNC` removido antes do `HMOVE` fazia as
+           raquetes se moverem sozinhas na horizontal — corrigido restaurando
+           o `WSYNC` (requisito de hardware, não só orçamento de ciclos).
+        3. Hipótese "bola muito fina pro passo de 2px aparecer" — testada
+           (aumentar largura para 8 color clocks) e **descartada**: não mudou
+           nada.
+        4. **Causa raiz real:** `HMCLR` estrobado só 3 ciclos depois do
+           `HMOVE` cortava a injeção do ajuste fino antes de completar — só
+           o reposicionamento grosso (`RESBL`) sobrevivia, dando saltos
+           grandes a cada ~7-8 frames em vez de deslizar. Corrigido removendo
+           o `HMCLR` do bloco por-frame da bola (não é necessário ali) e
+           dando folga extra antes do `HMCLR` no `Reset` (esse é necessário,
+           por isso não foi removido, só adiado). Confirmado pelo usuário.
+        Diagnóstico usado: piscar o fundo da tela com o contador de frame e
+        depois com o valor de `BallX` em RAM, para isolar timing global vs.
+        aritmética vs. posicionamento na tela antes de mexer em código.
   - [ ] Incremento 4 — colisão bola↔raquete (hardware, `CXP0FB`/`CXP1FB`) + bip.
   - [ ] Incremento 5 — paredes topo/base (reintroduzir, com orçamento de
         ciclos ok) e detecção de ponto (bola passa da raquete, substituindo
