@@ -209,8 +209,14 @@ and a randomized serve — all working and validated in Stella.
 - [x] **On-screen scoreboard:** a dedicated score row at the top of the
   frame (P0/P1 draw digits there instead of paddles — paddles are clamped
   out of that row, since the score display and the paddle graphics both
-  need the same two hardware objects). Reaching 5 points resets both
-  scores to a new game.
+  need the same two hardware objects).
+- [x] **Game state machine (ATTRACT/PLAYING/GAMEOVER):** matches real
+  Atari 2600 convention. At power-up and after a match ends, the game
+  freezes (paddles/ball stop) with the final score held on screen and the
+  background flashing during game-over; GAME RESET (re)starts a fresh
+  game immediately, from any state, including mid-rally. Paddle-size
+  difficulty moved from GAME RESET to GAME SELECT to free up RESET for
+  this role.
 - [ ] AI opponent, sound beyond the hit/score beeps.
 
 See `src/main.asm`'s header for the engineering notes worth remembering

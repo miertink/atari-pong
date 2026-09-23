@@ -17,8 +17,20 @@
 ;     nudges the ball's vertical angle (English/spin). The speed
 ;     progression resets on every point (ResetBall), not just a match
 ;     win — each rally starts back at BALL_SERVE_SPEED.
-;   - Score (ScoreP0/ScoreP1) shown on screen (DigitFont), reset to 0/0 on
-;     a match win (SCORE_TO_WIN).
+;   - Score (ScoreP0/ScoreP1) shown on screen (DigitFont); reaching
+;     SCORE_TO_WIN freezes the game (GameState=STATE_GAMEOVER) with the
+;     final score held on screen and the background flashing, rather than
+;     resetting immediately — see GameState below.
+;   - GameState (STATE_ATTRACT/PLAYING/GAMEOVER): mirrors real Atari 2600
+;     convention. At power-up (STATE_ATTRACT) and after a match ends
+;     (STATE_GAMEOVER, background flashing), paddles/ball are frozen —
+;     only GAME RESET (SWCHB bit 0) does anything, and it always
+;     (re)starts a fresh game immediately: 0/0 score, a new random serve,
+;     GameState=STATE_PLAYING. This is true in ANY state, including mid-
+;     rally — real GAME RESET switches restart the game outright, they
+;     don't ask for confirmation. Paddle-size difficulty, which used to
+;     live on GAME RESET, moved to GAME SELECT (SWCHB bit 1) so the two
+;     don't collide (see AdvancePaddleDifficulty/CheckStartButton).
 ;
 ; Engineering notes worth keeping in mind when touching this code:
 ;
@@ -56,7 +68,7 @@ PADDLE_HT      = 32             ; ORIGINAL (full-size) paddle height, in
                                  ; stage-0 entry and PaddleHt's initial
                                  ; value in Reset. The CURRENT height is
                                  ; the runtime value PaddleHt (RAM), which
-                                 ; the GAME RESET switch cycles through
+                                 ; the GAME SELECT switch cycles through
                                  ; PaddleHtTable (see the difficulty note
                                  ; further down and AdvancePaddleDifficulty).
 PADDLE_PATTERN = %00111100      ; paddle bit pattern (GRP0/GRP1)
@@ -104,13 +116,15 @@ BALL_RALLY_SPEED = 2
 HITS_PER_LEVEL = 5
 MAX_HIT_LEVEL  = 7              ; LevelSpeedTable has MAX_HIT_LEVEL+1 entries
 
-; Difficulty: the GAME RESET console switch (SWCHB bit 0, active low —
+; Difficulty: the GAME SELECT console switch (SWCHB bit 1, active low —
 ; doesn't force a real 6502 reset, it's just another software-readable
 ; switch) cycles the paddle height through 3 stages on each press: full
 ; size -> 3/4 -> 2/3 -> back to full. PaddleHtTable holds the 3 heights
 ; (2/3 of 32 rounds to 21). Detected by edge (comparing this frame's
-; switch state to last frame's in PrevResetState), so holding the button
-; down doesn't rapid-cycle through stages every frame.
+; switch state to last frame's in PrevSelectState), so holding the button
+; down doesn't rapid-cycle through stages every frame. GAME RESET (bit 0)
+; is reserved for starting/restarting the game — see CheckStartButton —
+; so the two switches don't step on each other.
 PADDLE_DIFFICULTY_STAGES = 3
 
 ; Serve angle: 3 profiles, picked by FREQUENCY (which axis, if any, skips
@@ -152,10 +166,26 @@ SOUND_SCORE_LEN  = 15
 ; centered in the byte the same way PADDLE_PATTERN is (bits 5-2) — same
 ; safe horizontal margin already validated for the paddles at P0_X/P1_X.
 ;
-; SCORE_TO_WIN resets both scores to 0 once reached — not just a nicety:
-; without a cap, a long session could push a score past 9 and index off
-; the end of DigitFont, corrupting the display.
+; SCORE_TO_WIN stops a score right there (see GameState below) — not just
+; a nicety: without a cap, a long session could push a score past 9 and
+; index off the end of DigitFont, corrupting the display.
 SCORE_TO_WIN   = 5
+
+; Game state machine: ATTRACT (power-up, frozen, waiting for GAME RESET)
+; -> PLAYING -> GAMEOVER (a score hit SCORE_TO_WIN; frozen again, final
+; score held on screen, background flashing) -> PLAYING again on the next
+; GAME RESET press. See CheckStartButton and the WallColor/CourtColor
+; flash computed once per frame in VBLANK.
+STATE_ATTRACT  = 0
+STATE_PLAYING  = 1
+STATE_GAMEOVER = 2
+FLASH_COLOR      = $3A          ; vivid red/orange — just needs to read
+                                 ; clearly as "different from black/white"
+FLASH_PERIOD_MASK = %00010000   ; Frame bit checked to toggle the flash;
+                                 ; this bit flips every 16 frames, giving
+                                 ; a full on/off cycle every ~0.53s — slow
+                                 ; enough to read clearly, well under
+                                 ; flicker-sensitivity ranges
 
 ; Score digits use their own colors (not the paddle/ball white) — COLUP0/
 ; COLUP1 swapped in for the score row only, then restored. Exact hues are
@@ -229,14 +259,25 @@ BoostThisFrame ds 1              ; computed fresh each frame: 1 = the ball
                                  ; axes), 0 = normal step
 PaddleHt ds 1                   ; CURRENT paddle height (RAM) — looked up
                                  ; from PaddleHtTable[PaddleDifficultyStage],
-                                 ; cycled by the GAME RESET switch
+                                 ; cycled by the GAME SELECT switch
 PaddleYMax ds 1                 ; COURT_BOTTOM-PaddleHt, recomputed whenever
                                  ; PaddleHt changes — highest valid P0Y/P1Y
                                  ; for the CURRENT size, so a smaller paddle
                                  ; can use the room a bigger one couldn't
 PaddleDifficultyStage ds 1      ; 0..PADDLE_DIFFICULTY_STAGES-1
+PrevSelectState ds 1            ; last frame's GAME SELECT switch bit, for
+                                 ; edge detection (AdvancePaddleDifficulty)
 PrevResetState ds 1             ; last frame's GAME RESET switch bit, for
-                                 ; edge detection
+                                 ; edge detection (CheckStartButton)
+GameState ds 1                  ; STATE_ATTRACT/PLAYING/GAMEOVER — gates
+                                 ; paddle/ball movement and the collision
+                                 ; response (see VBLANK); only PLAYING runs
+                                 ; them
+WallColor ds 1                  ; this frame's COLUBK for the wall zones
+CourtColor ds 1                  ; this frame's COLUBK for the court zone —
+                                 ; both computed once in VBLANK (normally
+                                 ; white/black, flashing FLASH_COLOR during
+                                 ; STATE_GAMEOVER), just read by the kernel
 
         SEG code
         ORG $F000
@@ -280,6 +321,22 @@ Reset
         ; on player reaction time), not from the seed itself.
         lda #$2B
         sta RandomSeed
+
+        ; Prime both switch-edge trackers from the actual current switch
+        ; state, rather than leaving them at CLEAN_START's zero — otherwise
+        ; a switch that happens to be released (non-zero bit) at power-up
+        ; would look like a fake "just-released" edge on frame 1 (harmless,
+        ; release edges are ignored, but priming is one instruction and
+        ; removes the question entirely).
+        lda SWCHB
+        and #%00000001
+        sta PrevResetState
+        lda SWCHB
+        and #%00000010
+        sta PrevSelectState
+
+        lda #STATE_ATTRACT       ; power-up: frozen, waiting for GAME RESET
+        sta GameState
 
         jsr ResetBall            ; center the ball, random direction/angle
 
@@ -331,6 +388,46 @@ MainLoop
 
         jsr AdvancePaddleDifficulty  ; before the paddles move, so a size
                                  ; change (if any) takes effect this frame
+
+        jsr CheckStartButton     ; GAME RESET: (re)starts the game from ANY
+                                 ; state — always checked, regardless of
+                                 ; GameState
+
+        ; --- game-over background flash: WallColor/CourtColor default to
+        ; the normal wall(white)/court(black) colors and are just read by
+        ; the kernel below (see their RAM comment) — kept out of the
+        ; cycle-tight visible-area code, computed once here instead where
+        ; the hardware timer already absorbs any extra cost (see the
+        ; header note on VBLANK timing).
+        lda #COLOR_WHITE
+        sta WallColor
+        lda #0
+        sta CourtColor
+        lda GameState
+        cmp #STATE_GAMEOVER
+        bne ColorsDone
+        lda Frame
+        and #FLASH_PERIOD_MASK
+        beq ColorsDone           ; this half of the flash cycle: stay normal
+        lda #FLASH_COLOR
+        sta WallColor
+        sta CourtColor
+ColorsDone
+
+        ; --- gameplay gate: paddle movement, ball movement, and the
+        ; collision response only run while actually PLAYING. In
+        ; STATE_ATTRACT/STATE_GAMEOVER everything just sits frozen at
+        ; whatever position it already has — jump straight to the ball's
+        ; per-frame horizontal reposition (BallMoveDone), which still must
+        ; run every frame regardless of state (re-asserts the same screen
+        ; position; see its own comment on why). A plain branch can't
+        ; reach that label from here (out of 6502 branch range), hence the
+        ; two-instruction beq/jmp instead of one bne.
+        lda GameState
+        cmp #STATE_PLAYING
+        beq DoGameplayUpdate
+        jmp BallMoveDone
+DoGameplayUpdate
 
         ; --- rally speed boost: adds a fractional (quarter-step) component
         ; on top of LevelSpeedTable's integer base, so the whole
@@ -496,9 +593,10 @@ SkipMoveY
         lda ScoreP1
         cmp #SCORE_TO_WIN
         bne SkipWinP1
-        lda #0                   ; match point reached -> new game
-        sta ScoreP0
-        sta ScoreP1
+        lda #STATE_GAMEOVER      ; match point reached — freeze here with
+        sta GameState            ; the final score on screen (NOT zeroed;
+                                 ; see CheckStartButton for where scores
+                                 ; actually reset, on the next GAME RESET)
 SkipWinP1
         jsr StartScoreSound
         jsr ResetBall
@@ -511,9 +609,8 @@ NoScoreP1
         lda ScoreP0
         cmp #SCORE_TO_WIN
         bne SkipWinP0
-        lda #0
-        sta ScoreP0
-        sta ScoreP1
+        lda #STATE_GAMEOVER
+        sta GameState
 SkipWinP0
         jsr StartScoreSound
         jsr ResetBall
@@ -648,7 +745,8 @@ ScoreRepeatLoop
         sta COLUP1
 
         ; --- top wall: WALL_HT lines, right below the score row ---
-        sta COLUBK               ; COLOR_WHITE, already in A from above
+        lda WallColor             ; normally COLOR_WHITE, flashes FLASH_COLOR
+        sta COLUBK                ; during STATE_GAMEOVER (see VBLANK)
         ldx #SCORE_HT            ; ScoreRowLoop counted rows with Y, not X
 TopWallLoop
         lda #0
@@ -683,8 +781,8 @@ SkipTBall
         cpx #SCORE_HT+WALL_HT
         bne TopWallLoop
 
-        lda #0
-        sta COLUBK
+        lda CourtColor            ; normally black, flashes FLASH_COLOR
+        sta COLUBK                ; during STATE_GAMEOVER (see VBLANK)
 MidLoop
         lda #0
         cpx P0Y
@@ -726,8 +824,8 @@ SkipMBall
 
         lda #0
         sta ENAM0                ; net stops at the bottom of the play area
-        lda #COLOR_WHITE
-        sta COLUBK
+        lda WallColor             ; normally COLOR_WHITE, flashes FLASH_COLOR
+        sta COLUBK                ; during STATE_GAMEOVER (see VBLANK)
 BottomWallLoop
         lda #0
         cpx P0Y
@@ -786,6 +884,18 @@ SkipBBall
         ; the paddle was moving at the moment of contact, that direction is
         ; added to BallDY, closing or opening the angle (never reaching 0
         ; — see the BALL_SPIN constant).
+        ;
+        ; Only runs while actually PLAYING — a frozen ball (ATTRACT/
+        ; GAMEOVER) sits centered, nowhere near either paddle, so this
+        ; would never fire in practice anyway, but skipping it outright
+        ; keeps "frozen means nothing changes" airtight rather than
+        ; relying on that geometry. CXCLR still runs every frame
+        ; regardless (the latches are sticky and must be drained).
+        lda GameState
+        cmp #STATE_PLAYING
+        beq DoCollisionCheck
+        jmp SkipCollisionResponse
+DoCollisionCheck
         lda CXP0FB
         and #COLLISION_BL
         beq NoHitP0
@@ -828,6 +938,7 @@ NoHitP0
 NoSpinP1
         jsr StartHitSound
 NoHitP1
+SkipCollisionResponse
         sta CXCLR
 
         ; --- sound: count down the beep timer, silence it at 0 ---
@@ -1049,24 +1160,25 @@ NoRandomTap
         rts
 
 ; ---------------------------------------------------------------------------
-; AdvancePaddleDifficulty - reads the GAME RESET console switch (SWCHB bit
-; 0, active low) and, on a fresh press (edge from released to pressed, not
+; AdvancePaddleDifficulty - reads the GAME SELECT console switch (SWCHB bit
+; 1, active low) and, on a fresh press (edge from released to pressed, not
 ; just "currently pressed" — otherwise holding it down would cycle through
 ; stages every single frame), advances PaddleDifficultyStage and looks up
-; the new PaddleHt from PaddleHtTable. Called once per frame, before the
-; paddles move (see VBLANK), so a change applies the same frame it's
-; detected.
+; the new PaddleHt from PaddleHtTable. Called once per frame, in any
+; GameState (a player can dial in difficulty before starting, same as a
+; real toggle switch), before the paddles move, so a change applies the
+; same frame it's detected.
 ; ---------------------------------------------------------------------------
 AdvancePaddleDifficulty
         lda SWCHB
-        and #%00000001           ; isolate the GAME RESET bit (0 = pressed)
+        and #%00000010           ; isolate the GAME SELECT bit (0 = pressed)
         tax
-        cpx PrevResetState
-        beq NoResetEdge          ; unchanged since last frame, nothing to do
-        stx PrevResetState
+        cpx PrevSelectState
+        beq NoSelectEdge         ; unchanged since last frame, nothing to do
+        stx PrevSelectState
         cpx #0
-        bne NoResetEdge          ; new state is 1 (released) — a release
-                                 ; edge, not a press; ignore it
+        bne NoSelectEdge         ; new state is non-zero (released) — a
+                                 ; release edge, not a press; ignore it
         inc PaddleDifficultyStage
         lda PaddleDifficultyStage
         cmp #PADDLE_DIFFICULTY_STAGES
@@ -1108,7 +1220,37 @@ P0ReanchorOk
         lda #PADDLE_Y_MIN
 P1ReanchorOk
         sta P1Y
-NoResetEdge
+NoSelectEdge
+        rts
+
+; ---------------------------------------------------------------------------
+; CheckStartButton - reads the GAME RESET console switch (SWCHB bit 0,
+; active low) and, on a fresh press (same edge-detection pattern as
+; AdvancePaddleDifficulty), immediately (re)starts a fresh game: both
+; scores to 0, a new random serve (ResetBall), GameState=STATE_PLAYING.
+; This runs in ANY GameState, including mid-rally — matches real Atari
+; 2600 hardware, where GAME RESET restarts the game outright whenever
+; pressed, not just from a title/game-over screen. Called once per frame,
+; before the gameplay gate (see VBLANK), so a restart takes effect the
+; same frame it's detected.
+; ---------------------------------------------------------------------------
+CheckStartButton
+        lda SWCHB
+        and #%00000001           ; isolate the GAME RESET bit (0 = pressed)
+        tax
+        cpx PrevResetState
+        beq NoStartEdge          ; unchanged since last frame, nothing to do
+        stx PrevResetState
+        cpx #0
+        bne NoStartEdge          ; new state is non-zero (released) — a
+                                 ; release edge, not a press; ignore it
+        lda #0
+        sta ScoreP0
+        sta ScoreP1
+        jsr ResetBall
+        lda #STATE_PLAYING
+        sta GameState
+NoStartEdge
         rts
 
 ; ---------------------------------------------------------------------------
