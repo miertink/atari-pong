@@ -1019,7 +1019,9 @@ PaddleHtTable
 ; ---------------------------------------------------------------------------
 DigitFont
         .byte $3C,$24,$24,$24,$3C  ; 0
-        .byte $00,$04,$04,$04,$00  ; 1
+        .byte $08,$0C,$04,$04,$00  ; 1 (small "nose" flag at the top,
+                                    ; merging into the stem, instead of a
+                                    ; plain vertical bar)
         .byte $3C,$04,$3C,$20,$3C  ; 2
         .byte $3C,$04,$3C,$04,$3C  ; 3
         .byte $00,$24,$3C,$04,$00  ; 4
