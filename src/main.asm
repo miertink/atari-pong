@@ -92,16 +92,17 @@ BALL_Y_MAX     = 192-WALL_HT-BALL_HT  ; not the screen's absolute edge
 BALL_SERVE_SPEED = 1
 BALL_RALLY_SPEED = 2
 
-; Rally speed then creeps up: +10% every HITS_PER_LEVEL paddle hits within
-; the current rally, reset back to level 0 on every point (see ResetBall).
-; With PADDLE_SPEED=3 and rally speed starting at 2, there is NO integer
-; value strictly between them — compounding 2.0 -> 2.2 -> 2.42 -> 2.66
-; (rounds to 3) reaches the paddle's own speed after 3 levels and has
-; nowhere left to go, so growth stops there (matches, never exceeds, the
-; paddle). LevelSpeedTable holds these hand-computed, pre-rounded values —
-; no runtime multiply/divide needed for something this small.
-HITS_PER_LEVEL = 10
-MAX_HIT_LEVEL  = 3              ; LevelSpeedTable has MAX_HIT_LEVEL+1 entries
+; Rally speed then creeps up every HITS_PER_LEVEL paddle hits within the
+; current rally, reset back to level 0 on every point (see ResetBall).
+; 8 levels (0..MAX_HIT_LEVEL) instead of a coarser 4 — smaller, more even
+; steps from serve speed up to PADDLE_SPEED. LevelSpeedTable holds each
+; level's integer base; BoostThresholdTable adds a quarter-step fraction
+; on top of most of them (see that table's comment for the full sequence
+; and why PADDLE_SPEED is a hard, never-exceeded cap). No runtime
+; multiply/divide needed for something this small — both tables are
+; hand-computed constants.
+HITS_PER_LEVEL = 5
+MAX_HIT_LEVEL  = 7              ; LevelSpeedTable has MAX_HIT_LEVEL+1 entries
 
 ; Difficulty: the GAME RESET console switch (SWCHB bit 0, active low —
 ; doesn't force a real 6502 reset, it's just another software-readable
@@ -220,13 +221,9 @@ InRally ds 1                    ; 0 = still serving (before the first hit),
                                  ; to 1 on the first paddle hit. Gates the
                                  ; rally speed boost below (serve is never
                                  ; boosted).
-RallyBoostCounter ds 1           ; counts frames toward the current level's
-                                 ; boost period (see BoostDivisorTable);
-                                 ; reset on level-up so each level's cycle
-                                 ; starts clean
-BoostDivisor ds 1                ; this frame's BoostDivisorTable[HitLevel],
-                                 ; cached so it can be compared against
-                                 ; after HitLevel's own lookup is done
+RallyBoostCounter ds 1           ; cycles 0..3 (quarter-frame phase, see
+                                 ; BoostThresholdTable); reset on level-up
+                                 ; so each level's cycle starts clean
 BoostThisFrame ds 1              ; computed fresh each frame: 1 = the ball
                                  ; takes an extra step this frame (both
                                  ; axes), 0 = normal step
@@ -335,31 +332,35 @@ MainLoop
         jsr AdvancePaddleDifficulty  ; before the paddles move, so a size
                                  ; change (if any) takes effect this frame
 
-        ; --- rally speed boost: adds a fractional component on top of
-        ; LevelSpeedTable's integer base, so the whole progression ramps in
-        ; small, roughly-even steps instead of a couple of small jumps
-        ; followed by one big one. Once rallying (InRally set), the ball
-        ; takes an extra step (in whatever direction it's already going)
-        ; every BoostDivisorTable[HitLevel] frames; a divisor of 0 means
-        ; this level has no fractional part, just LevelSpeedTable's flat
-        ; value. See BoostDivisorTable for the resulting speed sequence.
-        ; Computed once here, used by both DoMoveY and DoMoveX below.
+        ; --- rally speed boost: adds a fractional (quarter-step) component
+        ; on top of LevelSpeedTable's integer base, so the whole
+        ; progression ramps in small, roughly-even steps rather than a few
+        ; bigger jumps. RallyBoostCounter free-runs 0..3; within each
+        ; 4-frame cycle, the ball takes an extra step (in whatever
+        ; direction it's already going) on BoostThresholdTable[HitLevel]
+        ; of those 4 frames — 0 means this level is flat, no boost, just
+        ; LevelSpeedTable's value. See BoostThresholdTable for the
+        ; resulting speed sequence. Computed once here, used by both
+        ; DoMoveY and DoMoveX below.
         lda #0
         sta BoostThisFrame
         lda InRally
-        beq NoBoostCheck         ; still serving, never boost
+        beq NoBoostCheck         ; still serving, never boost — also leaves
+                                 ; RallyBoostCounter untouched until the
+                                 ; rally actually starts
         ldx HitLevel
-        lda BoostDivisorTable,x
-        sta BoostDivisor
-        beq NoBoostCheck         ; 0 = this level is flat, no boost
+        lda RallyBoostCounter
+        cmp BoostThresholdTable,x
+        bcs BoostCounterAdvance  ; counter >= threshold -> not this frame
+        lda #1
+        sta BoostThisFrame
+BoostCounterAdvance
         inc RallyBoostCounter
         lda RallyBoostCounter
-        cmp BoostDivisor
+        cmp #4
         bne NoBoostCheck
         lda #0
         sta RallyBoostCounter
-        lda #1
-        sta BoostThisFrame
 NoBoostCheck
 
         ; --- move paddle P0 (joystick 0 = left port: bit4=Up, bit5=Down) ---
@@ -851,32 +852,33 @@ OverscanLoop
 
 ; ---------------------------------------------------------------------------
 ; LevelSpeedTable - BASE (integer) rally speed at each HitLevel (0..
-; MAX_HIT_LEVEL). BoostDivisorTable below adds a fractional part on top of
-; some of these, so the values here alone are not the final speed — see
-; BoostDivisorTable for the actual average-speed sequence.
+; MAX_HIT_LEVEL). BoostThresholdTable below adds a quarter-step fraction on
+; top of most of these, so the values here alone are not the final speed —
+; see BoostThresholdTable for the actual average-speed sequence.
 ; ---------------------------------------------------------------------------
 LevelSpeedTable
-        .byte 1,2,2,3
+        .byte 1,1,1,2,2,2,2,3
 
 ; ---------------------------------------------------------------------------
-; BoostDivisorTable - fractional boost period (in frames) per HitLevel; see
-; the rally-boost block in MainLoop's VBLANK, which reads this indexed by
-; HitLevel. Every Nth frame the ball takes one extra step, adding an
-; average of +1/N to that level's LevelSpeedTable base; 0 means no boost,
-; this level runs at its flat integer value.
-;   L0: base 1, N=3 -> avg 1.333
-;   L1: base 2, N=0 -> flat 2.0
-;   L2: base 2, N=2 -> avg 2.5
-;   L3: base 3, N=0 -> flat 3.0 (= PADDLE_SPEED, hard-capped here — see the
-;                       constants note near HITS_PER_LEVEL for why the ball
-;                       must never reach/exceed paddle speed; no boost
-;                       headroom left at the cap)
-; Sequence: serve 1.0 -> 1.33 -> 2.0 -> 2.5 -> 3.0 — four similarly-sized
-; steps instead of the old 1.33 -> 2.0 -> 2.0 (flat) -> 3.0 (one big jump
-; at the end, no progress in between).
+; BoostThresholdTable - fractional boost strength per HitLevel, in quarters
+; (0-3); see the rally-boost block in MainLoop's VBLANK, which reads this
+; indexed by HitLevel. RallyBoostCounter free-runs 0..3; a threshold of k
+; boosts the ball (extra step, see BoostThisFrame) on k of those 4 frames,
+; adding an average of +k/4 to that level's LevelSpeedTable base. 0 means
+; no boost, this level runs at its flat integer value.
+;   L0: base 1, k=1 -> avg 1.25       L4: base 2, k=1 -> avg 2.25
+;   L1: base 1, k=2 -> avg 1.50       L5: base 2, k=2 -> avg 2.50
+;   L2: base 1, k=3 -> avg 1.75       L6: base 2, k=3 -> avg 2.75
+;   L3: base 2, k=0 -> flat 2.00      L7: base 3, k=0 -> flat 3.00
+; L7 (= PADDLE_SPEED) is a hard, never-boosted cap — see the constants
+; note near HITS_PER_LEVEL for why the ball must never reach/exceed
+; paddle speed; there's no boost headroom left once it's at the cap.
+; Sequence: serve 1.0 -> 1.25 -> 1.5 -> 1.75 -> 2.0 -> 2.25 -> 2.5 -> 2.75
+; -> 3.0 — eight even quarter-steps end to end, instead of four
+; unevenly-sized ones.
 ; ---------------------------------------------------------------------------
-BoostDivisorTable
-        .byte 3,0,2,0
+BoostThresholdTable
+        .byte 1,2,3,0,1,2,3,0
 
 ; ---------------------------------------------------------------------------
 ; PaddleHtTable - paddle height at each PaddleDifficultyStage (0..
