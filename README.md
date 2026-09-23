@@ -104,3 +104,7 @@ Feature-complete as a 2-player game. Not yet done: an AI opponent, and
 sound beyond the hit/score beeps. See
 [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md#7-status) for the detailed
 checklist.
+
+## License
+
+[MIT](LICENSE) — use it, fork it, learn from it.
