@@ -220,8 +220,13 @@ InRally ds 1                    ; 0 = still serving (before the first hit),
                                  ; to 1 on the first paddle hit. Gates the
                                  ; rally speed boost below (serve is never
                                  ; boosted).
-RallyBoostCounter ds 1           ; 0..2, cycles every 3 frames during the
-                                 ; first 10 hits of a rally (see BoostThisFrame)
+RallyBoostCounter ds 1           ; counts frames toward the current level's
+                                 ; boost period (see BoostDivisorTable);
+                                 ; reset on level-up so each level's cycle
+                                 ; starts clean
+BoostDivisor ds 1                ; this frame's BoostDivisorTable[HitLevel],
+                                 ; cached so it can be compared against
+                                 ; after HitLevel's own lookup is done
 BoostThisFrame ds 1              ; computed fresh each frame: 1 = the ball
                                  ; takes an extra step this frame (both
                                  ; axes), 0 = normal step
@@ -330,23 +335,26 @@ MainLoop
         jsr AdvancePaddleDifficulty  ; before the paddles move, so a size
                                  ; change (if any) takes effect this frame
 
-        ; --- rally speed boost: during the FIRST 10 hits of a rally only
-        ; (InRally set, HitLevel still 0), the ball takes an extra step
-        ; (in whatever direction it's already going) every 3rd frame,
-        ; averaging ~1.33x the base speed — a gentler ramp-up right after
-        ; serve than jumping straight to LevelSpeedTable's old flat value.
-        ; From HitLevel 1 onward, no boost — back to the plain integer
-        ; progression (2,2,3) already tuned before. Computed once here,
-        ; used by both DoMoveY and DoMoveX below.
+        ; --- rally speed boost: adds a fractional component on top of
+        ; LevelSpeedTable's integer base, so the whole progression ramps in
+        ; small, roughly-even steps instead of a couple of small jumps
+        ; followed by one big one. Once rallying (InRally set), the ball
+        ; takes an extra step (in whatever direction it's already going)
+        ; every BoostDivisorTable[HitLevel] frames; a divisor of 0 means
+        ; this level has no fractional part, just LevelSpeedTable's flat
+        ; value. See BoostDivisorTable for the resulting speed sequence.
+        ; Computed once here, used by both DoMoveY and DoMoveX below.
         lda #0
         sta BoostThisFrame
         lda InRally
         beq NoBoostCheck         ; still serving, never boost
-        lda HitLevel
-        bne NoBoostCheck         ; past the first 10 hits, no boost either
+        ldx HitLevel
+        lda BoostDivisorTable,x
+        sta BoostDivisor
+        beq NoBoostCheck         ; 0 = this level is flat, no boost
         inc RallyBoostCounter
         lda RallyBoostCounter
-        cmp #3
+        cmp BoostDivisor
         bne NoBoostCheck
         lda #0
         sta RallyBoostCounter
@@ -842,22 +850,33 @@ OverscanLoop
         jmp MainLoop
 
 ; ---------------------------------------------------------------------------
-; LevelSpeedTable - BASE rally speed at each HitLevel (0..MAX_HIT_LEVEL).
-;
-; L0 is 1, not the old flat 2: right after the first hit, BoostThisFrame
-; (see VBLANK) adds an extra step every 3rd frame instead, averaging
-; ~1.33x — gentler than jumping straight to 2x. L1-L3 keep the original,
-; already-tuned flat-integer progression (no boost applies once HitLevel
-; leaves 0), hand-computed by compounding 2.0 by 10% per level and
-; rounding to the nearest integer at each step (rounding the RUNNING
-; value, not a freshly-rounded one each time, so the fraction isn't lost):
-;   L1: 2.000*1.1=2.200  -> 2
-;   L2: 2.200*1.1=2.420  -> 2
-;   L3: 2.420*1.1=2.662  -> 3  (= PADDLE_SPEED; capped here, see constants
-;                               note near HITS_PER_LEVEL for why)
+; LevelSpeedTable - BASE (integer) rally speed at each HitLevel (0..
+; MAX_HIT_LEVEL). BoostDivisorTable below adds a fractional part on top of
+; some of these, so the values here alone are not the final speed — see
+; BoostDivisorTable for the actual average-speed sequence.
 ; ---------------------------------------------------------------------------
 LevelSpeedTable
         .byte 1,2,2,3
+
+; ---------------------------------------------------------------------------
+; BoostDivisorTable - fractional boost period (in frames) per HitLevel; see
+; the rally-boost block in MainLoop's VBLANK, which reads this indexed by
+; HitLevel. Every Nth frame the ball takes one extra step, adding an
+; average of +1/N to that level's LevelSpeedTable base; 0 means no boost,
+; this level runs at its flat integer value.
+;   L0: base 1, N=3 -> avg 1.333
+;   L1: base 2, N=0 -> flat 2.0
+;   L2: base 2, N=2 -> avg 2.5
+;   L3: base 3, N=0 -> flat 3.0 (= PADDLE_SPEED, hard-capped here — see the
+;                       constants note near HITS_PER_LEVEL for why the ball
+;                       must never reach/exceed paddle speed; no boost
+;                       headroom left at the cap)
+; Sequence: serve 1.0 -> 1.33 -> 2.0 -> 2.5 -> 3.0 — four similarly-sized
+; steps instead of the old 1.33 -> 2.0 -> 2.0 (flat) -> 3.0 (one big jump
+; at the end, no progress in between).
+; ---------------------------------------------------------------------------
+BoostDivisorTable
+        .byte 3,0,2,0
 
 ; ---------------------------------------------------------------------------
 ; PaddleHtTable - paddle height at each PaddleDifficultyStage (0..
@@ -1005,6 +1024,8 @@ AdvanceHitLevel
         cmp #MAX_HIT_LEVEL
         bcs AdvanceHitLevelDone  ; already capped, stay there
         inc HitLevel
+        lda #0
+        sta RallyBoostCounter    ; fresh boost cycle for the new level
 AdvanceHitLevelDone
         rts
 
