@@ -5,21 +5,7 @@ A from-scratch Pong clone for the Atari 2600 (NTSC), written entirely in
 high-level engine, just a hand-counted display kernel building the image
 line by line, the way it actually worked in 1977.
 
-```
-   1                                            0
-┌──────────────────────────────────────────────────┐
-│▓                                                  │
-│▓                       ¦                          │
-│▓                       ¦                          │
-│▓                       ¦                          │
-│                        ¦                       ▓  │
-│                        ¦                       ▓  │
-│                     o  ¦                       ▓  │
-│                        ¦                       ▓  │
-│                        ¦                          │
-│                        ¦                          │
-└──────────────────────────────────────────────────┘
-```
+![Gameplay in Stella: gold paddle leading 3-2, dashed center net, ball mid-rally](screenshot.png)
 
 ## What it is
 
