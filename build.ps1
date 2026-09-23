@@ -16,7 +16,7 @@ function Find-Stella {
 }
 
 function Invoke-Build {
-    if (-not (Test-Path $dasm)) { throw "dasm.exe nao encontrado em tools\. Veja README secao 2." }
+    if (-not (Test-Path $dasm)) { throw "dasm.exe nao encontrado em tools\. Veja docs\DEVELOPMENT.md secao 2." }
     New-Item -ItemType Directory -Force (Join-Path $root "build") | Out-Null
     Push-Location $root
     try {
