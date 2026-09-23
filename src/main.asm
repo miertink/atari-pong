@@ -1009,17 +1009,23 @@ PaddleHtTable
 ; Derived from standard 7-segment digit shapes (not copied from an
 ; unverified reference), so its correctness can be checked by hand:
 ; segments a(top)/b(upper-right)/c(lower-right)/d(bottom)/e(lower-left)/
-; f(upper-left)/g(middle) map to rows top,upper,middle,lower,bottom.
+; f(upper-left)/g(middle) map to rows top,upper,middle,lower,bottom. The
+; middle row is NOT purely "segment g, blank if g is off": on a real
+; 7-segment display b/f and c/e touch at mid-height even when g is unlit,
+; so whichever side stroke(s) rows 1/3 carry must also continue through
+; row 2, or the digit visibly splits into two disconnected halves with a
+; gap in between (found via a real emulator screenshot — 0 and 7, the
+; only two digits with g off, both shipped with row 2 wrongly blank).
 ; ---------------------------------------------------------------------------
 DigitFont
-        .byte $3C,$24,$00,$24,$3C  ; 0
+        .byte $3C,$24,$24,$24,$3C  ; 0
         .byte $00,$04,$04,$04,$00  ; 1
         .byte $3C,$04,$3C,$20,$3C  ; 2
         .byte $3C,$04,$3C,$04,$3C  ; 3
         .byte $00,$24,$3C,$04,$00  ; 4
         .byte $3C,$20,$3C,$04,$3C  ; 5
         .byte $3C,$20,$3C,$24,$3C  ; 6
-        .byte $3C,$04,$00,$04,$00  ; 7
+        .byte $3C,$04,$04,$04,$00  ; 7
         .byte $3C,$24,$3C,$24,$3C  ; 8
         .byte $3C,$24,$3C,$04,$3C  ; 9
 
