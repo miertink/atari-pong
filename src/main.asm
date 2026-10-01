@@ -736,6 +736,17 @@ ScoreRepeatLoop
         cpy #FONT_ROWS
         bne ScoreRowLoop
 
+        ; COLUBK first, right after ScoreRowLoop's last WSYNC, not last:
+        ; HBLANK is only ~22-23 CPU cycles: NUSIZ0/NUSIZ1/COLUP0/COLUP1
+        ; ahead of it (as this block used to be ordered) pushed WallColor's
+        ; write to ~24 cycles in — just past HBLANK — so a sliver of this
+        ; line's visible start still showed the score row's black COLUBK
+        ; before the wall's white took over. Put first, COLUBK lands at
+        ; ~6 cycles, safely inside HBLANK, invisible. The others don't
+        ; have this problem: nothing draws a pixel on this line before
+        ; TopWallLoop's own body clears GRP0/GRP1 below.
+        lda WallColor             ; normally COLOR_WHITE, flashes FLASH_COLOR
+        sta COLUBK                ; during STATE_GAMEOVER (see VBLANK)
         lda #NUSIZ0_PLAY         ; normal-width P0, keep the net's width
         sta NUSIZ0
         lda #0                   ; normal-width P1
@@ -745,8 +756,6 @@ ScoreRepeatLoop
         sta COLUP1
 
         ; --- top wall: WALL_HT lines, right below the score row ---
-        lda WallColor             ; normally COLOR_WHITE, flashes FLASH_COLOR
-        sta COLUBK                ; during STATE_GAMEOVER (see VBLANK)
         ldx #SCORE_HT            ; ScoreRowLoop counted rows with Y, not X
 TopWallLoop
         lda #0
