@@ -1031,18 +1031,30 @@ PaddleHtTable
 ; row 2, or the digit visibly splits into two disconnected halves with a
 ; gap in between (found via a real emulator screenshot — 0 and 7, the
 ; only two digits with g off, both shipped with row 2 wrongly blank).
+;
+; Two more rules, both found the same way (a real screenshot, not just
+; reasoning about the bytes): a bit added to "flag" a stroke (1's nose)
+; MUST share a row with that stroke's own column, not just a neighboring
+; one — two adjacent-but-different columns read as two disconnected
+; offset blocks (a "staircase"), not one shape with a flag on it. And
+; every digit should light SOMETHING in row 0 and row 4, even ones whose
+; real 7-segment shape skips the top/bottom bar (1, 4, 7) — leaving a
+; row fully blank makes that digit visibly shorter than the others at
+; this scale, not just differently shaped.
 ; ---------------------------------------------------------------------------
 DigitFont
         .byte $3C,$24,$24,$24,$3C  ; 0
-        .byte $08,$0C,$04,$04,$00  ; 1 (small "nose" flag at the top,
-                                    ; merging into the stem, instead of a
-                                    ; plain vertical bar)
+        .byte $0C,$04,$04,$04,$04  ; 1 (nose shares row 0 with the stem's
+                                    ; own column, then the stem runs the
+                                    ; full height, same as every digit)
         .byte $3C,$04,$3C,$20,$3C  ; 2
         .byte $3C,$04,$3C,$04,$3C  ; 3
-        .byte $00,$24,$3C,$04,$00  ; 4
+        .byte $24,$24,$3C,$04,$04  ; 4 (top uprights/bottom descender each
+                                    ; stretched one row further, to touch
+                                    ; row 0/row 4 like every other digit)
         .byte $3C,$20,$3C,$04,$3C  ; 5
         .byte $3C,$20,$3C,$24,$3C  ; 6
-        .byte $3C,$04,$04,$04,$00  ; 7
+        .byte $3C,$04,$04,$04,$04  ; 7 (descender stretched to row 4)
         .byte $3C,$24,$3C,$24,$3C  ; 8
         .byte $3C,$24,$3C,$04,$3C  ; 9
 
