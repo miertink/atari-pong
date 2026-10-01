@@ -219,9 +219,14 @@ and a randomized serve — all working and validated in Stella.
   Atari 2600 convention. At power-up and after a match ends, the game
   freezes (paddles/ball stop) with the final score held on screen and the
   background flashing during game-over; GAME RESET (re)starts a fresh
-  game immediately, from any state, including mid-rally. Paddle-size
-  difficulty moved from GAME RESET to GAME SELECT to free up RESET for
-  this role.
+  game immediately, from any state, including mid-rally.
+- [x] **Selectable match length (5/15/25).** GAME SELECT does double duty
+  by press duration: a short tap still cycles paddle-size difficulty, a
+  long hold (~0.75s) instead cycles the match length. Scores past 9 are
+  shown as two digits — the ones digit still uses the big DigitFont
+  glyph, the tens digit (0-2) is a separate narrow/wide marker on the
+  otherwise-idle M0/M1 missiles, since only two hardware objects exist
+  that can draw an arbitrary digit shape and both are already spoken for.
 - [ ] AI opponent, sound beyond the hit/score beeps.
 
 See `src/main.asm`'s header for the engineering notes worth remembering

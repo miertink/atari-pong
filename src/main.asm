@@ -28,9 +28,10 @@
 ;     (re)starts a fresh game immediately: 0/0 score, a new random serve,
 ;     GameState=STATE_PLAYING. This is true in ANY state, including mid-
 ;     rally — real GAME RESET switches restart the game outright, they
-;     don't ask for confirmation. Paddle-size difficulty, which used to
-;     live on GAME RESET, moved to GAME SELECT (SWCHB bit 1) so the two
-;     don't collide (see AdvancePaddleDifficulty/CheckStartButton).
+;     don't ask for confirmation. GAME SELECT (bit 1) does double duty by
+;     press DURATION rather than needing a second switch: a short tap
+;     cycles paddle-size difficulty, a long hold instead cycles match
+;     length (5/15/25 points) — see AdvanceSelectSettings/CheckStartButton.
 ;
 ; Engineering notes worth keeping in mind when touching this code:
 ;
@@ -68,9 +69,9 @@ PADDLE_HT      = 32             ; ORIGINAL (full-size) paddle height, in
                                  ; stage-0 entry and PaddleHt's initial
                                  ; value in Reset. The CURRENT height is
                                  ; the runtime value PaddleHt (RAM), which
-                                 ; the GAME SELECT switch cycles through
+                                 ; a GAME SELECT tap cycles through
                                  ; PaddleHtTable (see the difficulty note
-                                 ; further down and AdvancePaddleDifficulty).
+                                 ; further down and AdvanceSelectSettings).
 PADDLE_PATTERN = %00111100      ; paddle bit pattern (GRP0/GRP1)
 PADDLE_SPEED   = 3              ; scanlines/frame while holding the joystick
 FONT_ROWS      = 5              ; DigitFont height, in raw font rows
@@ -116,16 +117,22 @@ BALL_RALLY_SPEED = 2
 HITS_PER_LEVEL = 5
 MAX_HIT_LEVEL  = 7              ; LevelSpeedTable has MAX_HIT_LEVEL+1 entries
 
-; Difficulty: the GAME SELECT console switch (SWCHB bit 1, active low —
-; doesn't force a real 6502 reset, it's just another software-readable
-; switch) cycles the paddle height through 3 stages on each press: full
-; size -> 3/4 -> 2/3 -> back to full. PaddleHtTable holds the 3 heights
-; (2/3 of 32 rounds to 21). Detected by edge (comparing this frame's
-; switch state to last frame's in PrevSelectState), so holding the button
-; down doesn't rapid-cycle through stages every frame. GAME RESET (bit 0)
-; is reserved for starting/restarting the game — see CheckStartButton —
-; so the two switches don't step on each other.
+; Difficulty AND match length share the GAME SELECT console switch (SWCHB
+; bit 1, active low), split by press duration rather than needing a second
+; switch: a short TAP cycles paddle height through 3 stages (full -> 3/4
+; -> 2/3 -> back to full, PaddleHtTable); a LONG HOLD (released only after
+; SELECT_HOLD_THRESHOLD frames) instead cycles the match length through 3
+; stages (5 -> 15 -> 25 -> back to 5, MatchScoreTable). Both decisions are
+; made on RELEASE, once the hold duration is known (AdvanceSelectSettings
+; tracks it in SelectHoldFrames while the switch is down). GAME RESET
+; (bit 0) is reserved for starting/restarting the game — see
+; CheckStartButton — so the two switches don't step on each other.
 PADDLE_DIFFICULTY_STAGES = 3
+MATCH_LENGTH_STAGES      = 3
+SELECT_HOLD_THRESHOLD    = 45   ; frames (~0.75s @ 60Hz) — long enough that
+                                 ; an ordinary tap never accidentally reads
+                                 ; as a hold, short enough not to feel like
+                                 ; a dead button while waiting for it
 
 ; Serve angle: 3 profiles, picked by FREQUENCY (which axis, if any, skips
 ; odd frames) rather than by step magnitude — magnitude-based profiles
@@ -166,10 +173,25 @@ SOUND_SCORE_LEN  = 15
 ; centered in the byte the same way PADDLE_PATTERN is (bits 5-2) — same
 ; safe horizontal margin already validated for the paddles at P0_X/P1_X.
 ;
-; SCORE_TO_WIN stops a score right there (see GameState below) — not just
-; a nicety: without a cap, a long session could push a score past 9 and
-; index off the end of DigitFont, corrupting the display.
-SCORE_TO_WIN   = 5
+; Since match length can now go up to 25 (see MatchScoreTable below),
+; scores can reach double digits — but P0/P1 are the only two objects
+; that can draw an arbitrary bitmap (DigitFont), and both are already
+; spoken for (one digit each). Rather than risk a tight mid-scanline
+; reposition-and-redraw trick to get a true second digit (hard to get
+; exactly right without seeing it run), the ONES digit keeps using the
+; existing single-digit DigitFont lookup (now indexed by score MOD 10,
+; via SplitScore, instead of the raw score — the raw score would index
+; off the end of DigitFont for anything >= 10, corrupting the display),
+; and the TENS digit (0, 1, or 2 — never more, since 25 is the highest
+; match length) is shown as a separate narrow/wide marker using the
+; otherwise-idle M0/M1 missiles (P0Tens/P1Tens, ScoreNUSIZ0/ScoreNUSIZ1 —
+; see VBLANK and ScoreRowLoop). M0 doubles as the center net the rest of
+; the frame, so the top-wall zone spends its first few lines moving it
+; (and P0/P1) back — see TopWallLoop.
+SCORE_TO_WIN   = 5              ; the DEFAULT match length (MatchScoreTable
+                                 ; stage 0) — the live target is the RAM
+                                 ; var MatchScoreTarget; see AdvanceSelect-
+                                 ; Settings for how GAME SELECT changes it
 
 ; Game state machine: ATTRACT (power-up, frozen, waiting for GAME RESET)
 ; -> PLAYING -> GAMEOVER (a score hit SCORE_TO_WIN; frozen again, final
@@ -193,14 +215,18 @@ FLASH_PERIOD_MASK = %00010000   ; Frame bit checked to toggle the flash;
 SCORE_P0_COLOR = $2E            ; warm orange/gold
 SCORE_P1_COLOR = $9E            ; cool blue
 
-; NUSIZ0 packs two unrelated things in one register: player-0 copy/size
-; (bits 0-2) and missile-0 width (bits 4-5). Two combined values, since
-; both P0 and the missile-0 net line share it at different points in the
-; frame:
-NUSIZ0_SCORE   = %00010101      ; double-width P0 (score row) + net width
-NUSIZ0_PLAY    = %00010000      ; normal-width P0 (paddle) + net width
-NUSIZ1_SCORE   = %00000101      ; double-width P1 (score row only; P1 has
-                                 ; no missile, so no width bits needed)
+; NUSIZ0/1 each pack two unrelated things in one register: the player's
+; own copy/size (bits 0-2) and its paired missile's width (bits 4-5).
+; NUSIZ0 shares with M0 (the net, bits 4-5=01/narrow, always — the net's
+; own look never changes); NUSIZ1 now shares with M1 (P1's tens marker,
+; see below), so its width bits DO vary, by P1Tens.
+NUSIZ0_SCORE      = %00010101   ; double-width P0 (score row) + narrow M0
+NUSIZ0_SCORE_WIDE = %00110101   ; same, but WIDE M0 — used when P0Tens==2
+                                 ; (M0 is doubling as P0's tens marker here,
+                                 ; not the net — see ScoreRowLoop/TopWallLoop)
+NUSIZ0_PLAY       = %00010000   ; normal-width P0 (paddle) + narrow M0 (net)
+NUSIZ1_SCORE      = %00010101   ; double-width P1 (score row) + narrow M1
+NUSIZ1_SCORE_WIDE = %00110101   ; same, but WIDE M1 — used when P1Tens==2
 
 ; Center net: a dashed vertical line down the middle of the play area
 ; (classic tennis-net look), drawn with the otherwise-unused missile 0.
@@ -211,6 +237,12 @@ NET_X          = 80             ; horizontal center, same column as the ball
 
 P0_X           = 4              ; left paddle's fixed horizontal position
 P1_X           = 140            ; right paddle's fixed horizontal position
+P0_TENS_X      = 24             ; P0's tens marker (M0, score row only) —
+                                 ; to the RIGHT of P0_X (no room to its
+                                 ; left, P0_X is only 4 columns from the
+                                 ; screen edge)
+P1_TENS_X      = 116            ; P1's tens marker (M1, score row only) —
+                                 ; to the LEFT of P1_X, mirroring P0's side
 BALL_X_INIT    = 80             ; ball's initial horizontal position (center)
 P0_Y_INIT      = 80             ; left paddle's top (line 0-191); centered
 P1_Y_INIT      = 80             ; for PADDLE_HT=32
@@ -230,8 +262,9 @@ BallDX  ds 1                    ; horizontal speed: +-BALL_SERVE_SPEED or
                                  ; +-BALL_RALLY_SPEED (+-BALL_SPIN on BallDY)
 BallDY  ds 1                    ; vertical speed, same scale as BallDX
 SoundTimer ds 1                 ; frames left on the current beep (0 = silent)
-ScoreP0 ds 1                    ; left player's score (0-9, capped/reset at
-ScoreP1 ds 1                    ; SCORE_TO_WIN)
+ScoreP0 ds 1                    ; left player's score (0-25, capped at
+ScoreP1 ds 1                    ; MatchScoreTarget; see SplitScore for how
+                                 ; this displays as 2 digits)
 RandomSeed ds 1                 ; LFSR state (must never be 0 — see AdvanceRandom)
 P0Dir   ds 1                    ; this frame's paddle direction: -1 (up),
 P1Dir   ds 1                    ; 0 (still), +1 (down) — used for ball English
@@ -241,7 +274,8 @@ BallSkipMode ds 1                ; BALL_SKIP_NONE/Y/X — which axis (if any)
                                  ; paddle hit (rally only uses the spin
                                  ; effect).
 P0FontPtr ds 2                  ; pointer into DigitFont for this frame's
-P1FontPtr ds 2                  ; score row (computed once, read per line)
+P1FontPtr ds 2                  ; UNITS digit (computed in VBLANK, see
+                                 ; SplitScore; read per row in ScoreRowLoop)
 HitLevel ds 1                   ; 0..MAX_HIT_LEVEL — indexes LevelSpeedTable
 HitsSinceLevelUp ds 1           ; 0..HITS_PER_LEVEL-1, counts toward the
                                  ; next level. Both reset to 0 in ResetBall
@@ -266,9 +300,20 @@ PaddleYMax ds 1                 ; COURT_BOTTOM-PaddleHt, recomputed whenever
                                  ; can use the room a bigger one couldn't
 PaddleDifficultyStage ds 1      ; 0..PADDLE_DIFFICULTY_STAGES-1
 PrevSelectState ds 1            ; last frame's GAME SELECT switch bit, for
-                                 ; edge detection (AdvancePaddleDifficulty)
+                                 ; edge detection (AdvanceSelectSettings)
 PrevResetState ds 1             ; last frame's GAME RESET switch bit, for
                                  ; edge detection (CheckStartButton)
+SelectHoldFrames ds 1           ; counts frames GAME SELECT has been held
+                                 ; down this press; compared against
+                                 ; SELECT_HOLD_THRESHOLD on release to tell
+                                 ; a tap from a hold (AdvanceSelectSettings)
+MatchLengthStage ds 1           ; 0..MATCH_LENGTH_STAGES-1 — indexes
+                                 ; MatchScoreTable, cycled by a GAME SELECT
+                                 ; hold
+MatchScoreTarget ds 1           ; the LIVE match length (5/15/25) — what
+                                 ; ScoreP0/ScoreP1 are actually compared
+                                 ; against to end a match (replaces the
+                                 ; old compile-time SCORE_TO_WIN there)
 GameState ds 1                  ; STATE_ATTRACT/PLAYING/GAMEOVER — gates
                                  ; paddle/ball movement and the collision
                                  ; response (see VBLANK); only PLAYING runs
@@ -278,6 +323,22 @@ CourtColor ds 1                  ; this frame's COLUBK for the court zone —
                                  ; both computed once in VBLANK (normally
                                  ; white/black, flashing FLASH_COLOR during
                                  ; STATE_GAMEOVER), just read by the kernel
+P0Tens ds 1                     ; P0's tens digit (0-2) for this frame's
+P1Tens ds 1                     ; score, from SplitScore; 0 = under 10,
+                                 ; marker off (see ScoreRowLoop)
+ScoreNUSIZ0 ds 1                ; this frame's NUSIZ0/1 for the score row —
+ScoreNUSIZ1 ds 1                ; NUSIZ0/1_SCORE, or the _WIDE variant when
+                                 ; that player's tens marker is at 2 —
+                                 ; computed once in VBLANK, just read by
+                                 ; the kernel (same pattern as WallColor)
+ScoreENAM0 ds 1                 ; this frame's ENAM0/1 for the score row —
+ScoreENAM1 ds 1                 ; 0 or the enable bit, from P0Tens/P1Tens;
+                                 ; also precomputed in VBLANK so the score
+                                 ; row's first line doesn't have to branch
+                                 ; on it (that line is tight already)
+ScoreScratch ds 1               ; short-lived scratch byte for the *5 font-
+                                 ; pointer math in VBLANK (see SplitScore's
+                                 ; call sites) — not meaningful between uses
 
         SEG code
         ORG $F000
@@ -302,6 +363,11 @@ Reset
         lda #PADDLE_HT           ; full size (stage 0) to start
         sta PaddleHt
         jsr RecomputePaddleYMax
+
+        lda #0
+        sta MatchLengthStage
+        lda #SCORE_TO_WIN        ; stage 0's length (5) to start
+        sta MatchScoreTarget
 
         lda #P0_Y_INIT
         sta P0Y
@@ -340,9 +406,13 @@ Reset
 
         jsr ResetBall            ; center the ball, random direction/angle
 
-        ; One-time horizontal positioning. P0/P1 never reposition
-        ; horizontally again (only move vertically); the ball is
-        ; repositioned every frame in MainLoop since it moves.
+        ; One-time horizontal positioning. P1_TENS_X (M1, P1's tens
+        ; marker) is the only one that's TRULY one-time — M1 has no other
+        ; role, so it never moves again. P0/P1 themselves now DO
+        ; reposition again every frame (TopWallLoop moves them back after
+        ; the score row borrows M0 — see there), and M0/BL already did;
+        ; this call just establishes frame-1's starting position for all
+        ; of them before the first score row runs.
         lda #P0_X
         ldx #0
         jsr SetHorizPos          ; P0
@@ -351,19 +421,23 @@ Reset
         jsr SetHorizPos          ; P1
         lda #NET_X
         ldx #2
-        jsr SetHorizPos          ; M0 (center net)
+        jsr SetHorizPos          ; M0 (center net / P0's tens marker)
+        lda #P1_TENS_X
+        ldx #3
+        jsr SetHorizPos          ; M1 (P1's tens marker — permanent spot)
         lda #BALL_X_INIT
         ldx #4
         jsr SetHorizPos          ; BL
         sta WSYNC
         sta HMOVE
         ; HMCLR is deliberately NOT strobed right after HMOVE here — see
-        ; the header note. P0/P1/BL won't reposition again for a while
-        ; (P0/P1 never; the ball not until next frame), but HMP0/HMP1/HMBL
-        ; still need clearing eventually so the ball's later HMOVE calls
-        ; don't reapply them (that's what made the paddles drift on their
-        ; own). Reset only runs once, so an extra line of slack costs
-        ; nothing.
+        ; the header note. None of these reposition again for a while
+        ; (the earliest is M0, moved by VBLANK's ball-reposition block
+        ; next frame), but HMP0/HMP1/HMM0/HMM1/HMBL still need clearing
+        ; eventually so the next HMOVE strobe (the ball's, next frame)
+        ; doesn't reapply them (that's what made the paddles drift on
+        ; their own, the first time this was gotten wrong). Reset only
+        ; runs once, so an extra line of slack costs nothing.
         sta WSYNC
         sta HMCLR
 
@@ -386,12 +460,81 @@ MainLoop
                                  ; LFSR "spinning" independent of gameplay,
                                  ; so it looks random whenever a serve happens
 
-        jsr AdvancePaddleDifficulty  ; before the paddles move, so a size
+        jsr AdvanceSelectSettings  ; before the paddles move, so a size
                                  ; change (if any) takes effect this frame
 
         jsr CheckStartButton     ; GAME RESET: (re)starts the game from ANY
                                  ; state — always checked, regardless of
                                  ; GameState
+
+        ; --- score display prep: split each score into tens(0-2)/units
+        ; (0-9) via SplitScore, since match length can now exceed 9 (see
+        ; the DigitFont note near SCORE_TO_WIN for why this lives here —
+        ; P0FontPtr/P1FontPtr indexed by the raw score would read off the
+        ; end of DigitFont for anything >= 10). Also folds each tens
+        ; marker's width into ScoreNUSIZ0/1, so the kernel just reads a
+        ; precomputed value instead of branching per frame. Computed
+        ; here, every frame, regardless of GameState — the score must
+        ; keep displaying correctly even while frozen.
+        lda ScoreP0
+        jsr SplitScore           ; X=tens(0-2), A=units(0-9)
+        stx P0Tens
+        sta ScoreScratch
+        asl
+        asl
+        clc
+        adc ScoreScratch         ; A = units*5 (FONT_ROWS)
+        clc
+        adc #<DigitFont
+        sta P0FontPtr
+        lda #>DigitFont
+        adc #0
+        sta P0FontPtr+1
+
+        lda ScoreP1
+        jsr SplitScore
+        stx P1Tens
+        sta ScoreScratch
+        asl
+        asl
+        clc
+        adc ScoreScratch
+        clc
+        adc #<DigitFont
+        sta P1FontPtr
+        lda #>DigitFont
+        adc #0
+        sta P1FontPtr+1
+
+        lda #NUSIZ0_SCORE
+        ldx P0Tens
+        cpx #2
+        bne P0WidthDone
+        lda #NUSIZ0_SCORE_WIDE
+P0WidthDone
+        sta ScoreNUSIZ0
+
+        lda #NUSIZ1_SCORE
+        ldx P1Tens
+        cpx #2
+        bne P1WidthDone
+        lda #NUSIZ1_SCORE_WIDE
+P1WidthDone
+        sta ScoreNUSIZ1
+
+        lda #0
+        ldx P0Tens
+        beq P0EnamDone
+        lda #%00000010           ; ENAM0's enable bit
+P0EnamDone
+        sta ScoreENAM0
+
+        lda #0
+        ldx P1Tens
+        beq P1EnamDone
+        lda #%00000010           ; ENAM1's enable bit
+P1EnamDone
+        sta ScoreENAM1
 
         ; --- game-over background flash: WallColor/CourtColor default to
         ; the normal wall(white)/court(black) colors and are just read by
@@ -591,7 +734,7 @@ SkipMoveY
         bcs NoScoreP1            ; BallX > BALL_X_MIN, not there yet
         inc ScoreP1              ; ball passed the left paddle -> right player scores
         lda ScoreP1
-        cmp #SCORE_TO_WIN
+        cmp MatchScoreTarget
         bne SkipWinP1
         lda #STATE_GAMEOVER      ; match point reached — freeze here with
         sta GameState            ; the final score on screen (NOT zeroed;
@@ -607,7 +750,7 @@ NoScoreP1
         bcc NoScoreP0            ; BallX < BALL_X_MAX, not there yet
         inc ScoreP0              ; ball passed the right paddle -> left player scores
         lda ScoreP0
-        cmp #SCORE_TO_WIN
+        cmp MatchScoreTarget
         bne SkipWinP0
         lda #STATE_GAMEOVER
         sta GameState
@@ -640,23 +783,32 @@ BallMoveDone
         lda BallX
 
         ; Reposition the ball horizontally (the only object that still
-        ; moves horizontally here). SetHorizPos does its own internal
-        ; WSYNC, needed for the position math.
+        ; moves every frame here). SetHorizPos does its own internal
+        ; WSYNC, needed for the position math. M0 rides along in the same
+        ; WSYNC/HMOVE pair, moved to THIS frame's P0_TENS_X (it spends the
+        ; score row as P0's tens marker, not the net — see the DigitFont
+        ; note near SCORE_TO_WIN); TopWallLoop moves it back to NET_X once
+        ; the score row is done with it.
         ;
         ; The "sta WSYNC" below, before HMOVE, is NOT about cycle budget
         ; (the timer already covers that) — it's a hardware requirement:
         ; HMOVE must be strobed right at the start of a scanline (~24
         ; cycle window). See header note.
         ldx #4
-        jsr SetHorizPos
+        jsr SetHorizPos          ; BL
+        lda #P0_TENS_X
+        ldx #2
+        jsr SetHorizPos          ; M0
         sta WSYNC
         sta HMOVE
         ; No HMCLR here — see header note (a truncated fine-motion
         ; injection was the root cause of the ball "galloping" instead of
-        ; sliding). Not needed anyway: HMBL gets overwritten fresh by
-        ; SetHorizPos before the next HMOVE, so nothing stale carries over
-        ; between frames. (HMP0/HMP1 stay fine — already zeroed once in
-        ; Reset.)
+        ; sliding). Not needed for BL/M0 anyway: both get overwritten
+        ; fresh by SetHorizPos before their next HMOVE, so nothing stale
+        ; carries over between frames. HMP0/HMP1 stay fine too, as long
+        ; as TopWallLoop's own HMCLR (see there) keeps clearing them after
+        ; ITS HMOVE each frame — if that ever changes, this HMOVE would
+        ; start re-nudging P0/P1 by a stale leftover fine offset.
 
         TIMER_WAIT
         lda #0
@@ -681,43 +833,25 @@ BallMoveDone
         inc Frame
 
         ; --- score row: SCORE_HT lines, above the top wall. P0/P1 draw
-        ; digits instead of paddles here. Font pointers computed once
-        ; (score*FONT_ROWS + table base), then just indexed by row inside
-        ; the loop. Double width (NUSIZ0/NUSIZ1) applies only here — reset
-        ; to normal before the paddles draw below, or PADDLE_PATTERN would
-        ; come out double size too.
-        lda ScoreP0
-        asl
-        asl
-        clc
-        adc ScoreP0              ; A = ScoreP0*5 (FONT_ROWS)
-        clc
-        adc #<DigitFont
-        sta P0FontPtr
-        lda #>DigitFont
-        adc #0
-        sta P0FontPtr+1
-
-        lda ScoreP1
-        asl
-        asl
-        clc
-        adc ScoreP1
-        clc
-        adc #<DigitFont
-        sta P1FontPtr
-        lda #>DigitFont
-        adc #0
-        sta P1FontPtr+1
-
-        lda #NUSIZ0_SCORE        ; double-width P0 + net width (net isn't
-        sta NUSIZ0               ; drawn here, but its width bits live here)
-        lda #NUSIZ1_SCORE        ; double-width P1
+        ; the UNITS digit instead of paddles here (font pointers, already
+        ; computed in VBLANK — see there); M0/M1 draw each player's TENS
+        ; marker at the same time (P0Tens/P1Tens, also from VBLANK) —
+        ; M0 is only visiting (it's the center net the rest of the
+        ; frame; TopWallLoop moves it back). Double width (ScoreNUSIZ0/1)
+        ; applies only here — reset to normal before the paddles draw
+        ; below, or PADDLE_PATTERN would come out double size too.
+        lda ScoreNUSIZ0
+        sta NUSIZ0
+        lda ScoreNUSIZ1
         sta NUSIZ1
         lda #SCORE_P0_COLOR
         sta COLUP0
         lda #SCORE_P1_COLOR
         sta COLUP1
+        lda ScoreENAM0
+        sta ENAM0
+        lda ScoreENAM1
+        sta ENAM1
 
         lda #0
         sta COLUBK
@@ -744,10 +878,47 @@ ScoreRepeatLoop
         sta COLUP0
         sta COLUP1
 
-        ; --- top wall: WALL_HT lines, right below the score row ---
+        ; --- top wall: WALL_HT lines, right below the score row. Its
+        ; first few lines move P0/P1 back to their normal paddle position
+        ; and M0 back to NET_X (both borrowed for the score row's tens
+        ; markers) via the same proven SetHorizPos+HMOVE dance used once
+        ; in Reset, just repeated here every frame. Safe to "spend" wall
+        ; lines on this: paddles/ball never draw in TopWallLoop's range
+        ; anyway (it sits entirely below PADDLE_Y_MIN), so losing a few
+        ; iterations to repositioning costs nothing visually, as long as
+        ; the total line count still adds up to WALL_HT (see below).
         lda WallColor             ; normally COLOR_WHITE, flashes FLASH_COLOR
         sta COLUBK                ; during STATE_GAMEOVER (see VBLANK)
-        ldx #SCORE_HT            ; ScoreRowLoop counted rows with Y, not X
+        lda #0
+        sta GRP0                 ; clear the score row's digit patterns —
+        sta GRP1                 ; otherwise they'd keep showing, sliding
+        sta ENAM0                ; sideways as P0/M0 reposition below
+        sta ENAM1
+
+        lda #P0_X
+        ldx #0
+        jsr SetHorizPos          ; P0 back to its paddle position
+        lda #P1_X
+        ldx #1
+        jsr SetHorizPos          ; P1 back to its paddle position
+        lda #NET_X
+        ldx #2
+        jsr SetHorizPos          ; M0 back to the center net's position
+        sta WSYNC
+        sta HMOVE
+        ; HMCLR is deliberately NOT immediately after HMOVE here either —
+        ; same reasoning as Reset: strobing it too soon truncates the
+        ; fine-motion injection for an object just positioned by THIS
+        ; HMOVE. One extra line of slack is cheap; TopWallLoop's own
+        ; checks never draw anything in this zone anyway (see above).
+        sta WSYNC
+        sta HMCLR
+
+        ; 5 lines already spent above (3 SetHorizPos calls + the HMOVE
+        ; line + this slack line); the loop below covers the remaining
+        ; WALL_HT-5, landing on the same SCORE_HT+WALL_HT boundary as
+        ; before so MidLoop still starts in the right place.
+        ldx #SCORE_HT+5
 TopWallLoop
         lda #0
         cpx P0Y
@@ -993,12 +1164,20 @@ BoostThresholdTable
 
 ; ---------------------------------------------------------------------------
 ; PaddleHtTable - paddle height at each PaddleDifficultyStage (0..
-; PADDLE_DIFFICULTY_STAGES-1), cycled by the GAME RESET switch (see
-; AdvancePaddleDifficulty): full PADDLE_HT(32), then 3/4 (24, exact),
+; PADDLE_DIFFICULTY_STAGES-1), cycled by a GAME SELECT tap (see
+; AdvanceSelectSettings): full PADDLE_HT(32), then 3/4 (24, exact),
 ; then 2/3 (32*2/3 = 21.33, rounded to 21).
 ; ---------------------------------------------------------------------------
 PaddleHtTable
         .byte PADDLE_HT, (PADDLE_HT*3)/4, 21
+
+; ---------------------------------------------------------------------------
+; MatchScoreTable - match length (points to win) at each MatchLengthStage
+; (0..MATCH_LENGTH_STAGES-1), cycled by a GAME SELECT hold (see
+; AdvanceSelectSettings): 5 (SCORE_TO_WIN, the default), then 15, then 25.
+; ---------------------------------------------------------------------------
+MatchScoreTable
+        .byte SCORE_TO_WIN, 15, 25
 
 ; ---------------------------------------------------------------------------
 ; DigitFont - 10 digits (0-9) x FONT_ROWS(5) bytes, one byte per font row
@@ -1168,32 +1347,56 @@ NoRandomTap
         rts
 
 ; ---------------------------------------------------------------------------
-; AdvancePaddleDifficulty - reads the GAME SELECT console switch (SWCHB bit
-; 1, active low) and, on a fresh press (edge from released to pressed, not
-; just "currently pressed" — otherwise holding it down would cycle through
-; stages every single frame), advances PaddleDifficultyStage and looks up
-; the new PaddleHt from PaddleHtTable. Called once per frame, in any
-; GameState (a player can dial in difficulty before starting, same as a
+; AdvanceSelectSettings - reads the GAME SELECT console switch (SWCHB bit
+; 1, active low) and, on RELEASE, uses how long it was held to decide
+; between two different settings (see the constants note near
+; SELECT_HOLD_THRESHOLD): a short TAP cycles paddle-size difficulty
+; (unchanged from before — PaddleDifficultyStage/PaddleHtTable, including
+; the bottom-edge re-anchoring), a long HOLD instead cycles match length
+; (MatchLengthStage/MatchScoreTable). SelectHoldFrames accumulates while
+; the switch is down (SelectSameState below) and is read once, on the
+; release edge, to classify the press — it does NOT drive anything while
+; still held, so there's no visible feedback until release (the setting
+; actually changing is the feedback). Called once per frame, in any
+; GameState (a player can dial in settings before starting, same as a
 ; real toggle switch), before the paddles move, so a change applies the
 ; same frame it's detected.
 ; ---------------------------------------------------------------------------
-AdvancePaddleDifficulty
+AdvanceSelectSettings
         lda SWCHB
         and #%00000010           ; isolate the GAME SELECT bit (0 = pressed)
         tax
         cpx PrevSelectState
-        beq NoSelectEdge         ; unchanged since last frame, nothing to do
+        beq SelectSameState      ; unchanged since last frame
         stx PrevSelectState
         cpx #0
-        bne NoSelectEdge         ; new state is non-zero (released) — a
-                                 ; release edge, not a press; ignore it
+        bne SelectReleased       ; new state is non-zero (released) — a
+                                 ; release edge; classify the press below
+        ; fresh press: start counting how long it's held
+        lda #0
+        sta SelectHoldFrames
+        jmp SelectSettingsDone
+SelectSameState
+        lda PrevSelectState
+        bne SelectSettingsDone   ; currently released, nothing to accumulate
+        lda SelectHoldFrames
+        cmp #255                 ; clamp — a very long hold must not wrap
+        beq SelectSettingsDone   ; the counter back toward "short tap"
+        inc SelectHoldFrames
+        jmp SelectSettingsDone
+SelectReleased
+        lda SelectHoldFrames
+        cmp #SELECT_HOLD_THRESHOLD
+        bcs SelectLongPress      ; held long enough -> match length
+
+        ; --- short tap: cycle paddle-size difficulty ---
         inc PaddleDifficultyStage
         lda PaddleDifficultyStage
         cmp #PADDLE_DIFFICULTY_STAGES
-        bne NoStageWrap
+        bne SelectNoStageWrap
         lda #0
         sta PaddleDifficultyStage
-NoStageWrap
+SelectNoStageWrap
         ldx PaddleDifficultyStage
         lda PaddleHtTable,x
         sta PaddleHt
@@ -1228,13 +1431,31 @@ P0ReanchorOk
         lda #PADDLE_Y_MIN
 P1ReanchorOk
         sta P1Y
-NoSelectEdge
+        jmp SelectSettingsDone
+
+SelectLongPress
+        ; --- long hold: cycle match length. Doesn't touch the CURRENT
+        ; match's GameState/score — a longer target just applies from
+        ; here on; shortening it, if already past the new target, takes
+        ; effect on the next point (the normal win-check already uses
+        ; MatchScoreTarget, see MainLoop's score-detection block).
+        inc MatchLengthStage
+        lda MatchLengthStage
+        cmp #MATCH_LENGTH_STAGES
+        bne SelectNoLengthWrap
+        lda #0
+        sta MatchLengthStage
+SelectNoLengthWrap
+        ldx MatchLengthStage
+        lda MatchScoreTable,x
+        sta MatchScoreTarget
+SelectSettingsDone
         rts
 
 ; ---------------------------------------------------------------------------
 ; CheckStartButton - reads the GAME RESET console switch (SWCHB bit 0,
 ; active low) and, on a fresh press (same edge-detection pattern as
-; AdvancePaddleDifficulty), immediately (re)starts a fresh game: both
+; AdvanceSelectSettings), immediately (re)starts a fresh game: both
 ; scores to 0, a new random serve (ResetBall), GameState=STATE_PLAYING.
 ; This runs in ANY GameState, including mid-rally — matches real Atari
 ; 2600 hardware, where GAME RESET restarts the game outright whenever
@@ -1262,10 +1483,35 @@ NoStartEdge
         rts
 
 ; ---------------------------------------------------------------------------
+; SplitScore - splits a 0-25 score into tens/units for display (see the
+; DigitFont note near SCORE_TO_WIN for why: only 2 bitmap objects exist,
+; so the tens digit is a separate marker, not a second DigitFont glyph).
+; IN:  A = score (0-25 — MatchScoreTable's highest entry, so this is the
+;      most SplitScore ever needs to handle)
+; OUT: X = tens digit (0-2), A = units digit (0-9)
+; No multiply/divide needed: with only 3 possible tens values, two
+; straight-line compares are simpler and cheaper than a real division.
+; ---------------------------------------------------------------------------
+SplitScore
+        ldx #0
+        cmp #20
+        bcc SplitScoreLT20
+        sbc #20                  ; carry is already set (cmp didn't branch)
+        ldx #2
+        rts
+SplitScoreLT20
+        cmp #10
+        bcc SplitScoreDone       ; tens=0 (X already 0), A unchanged
+        sbc #10                  ; carry is already set (cmp didn't branch)
+        ldx #1
+SplitScoreDone
+        rts
+
+; ---------------------------------------------------------------------------
 ; RecomputePaddleYMax - sets PaddleYMax = COURT_BOTTOM - PaddleHt: the
 ; highest P0Y/P1Y that keeps the CURRENT-size paddle's bottom edge from
 ; overlapping the bottom wall. Called once at Reset and again whenever
-; PaddleHt changes (AdvancePaddleDifficulty), not every frame — it doesn't
+; PaddleHt changes (AdvanceSelectSettings), not every frame — it doesn't
 ; change on its own between those events.
 ; ---------------------------------------------------------------------------
 RecomputePaddleYMax
