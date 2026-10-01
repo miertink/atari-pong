@@ -950,10 +950,25 @@ SkipCollisionResponse
         sta AUDV0
 SoundDone
 
-        ; --- Overscan: 30 lines ---
+        ; Cleanly end this line before asserting VBLANK below. Everything
+        ; since BottomWallLoop's last WSYNC (object-clear, the collision
+        ; response — several extra JSRs on a hit, so its cost varies frame
+        ; to frame — and the sound countdown above) has run with no WSYNC
+        ; of its own, sharing whatever's left of the current line same as
+        ; every other zone transition in this kernel. That's fine for a
+        ; register like COLUBK, but VBLANK takes effect immediately,
+        ; mid-scanline, wherever this variable-cost cleanup happened to
+        ; finish — splitting that one line visibly half-lit/half-blanked.
+        ; Seen as a short gap in the bottom wall whose exact column drifts
+        ; frame to frame (reported as a flickering line). This WSYNC
+        ; finishes that line on its own first, so VBLANK always lands at
+        ; the very start of the next one instead.
+        sta WSYNC
+
+        ; --- Overscan: 30 lines total (the WSYNC above is the first) ---
         lda #2
         sta VBLANK
-        ldx #30
+        ldx #29
 OverscanLoop
         sta WSYNC
         dex
