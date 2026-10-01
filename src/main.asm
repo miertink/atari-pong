@@ -736,15 +736,28 @@ ScoreRepeatLoop
         cpy #FONT_ROWS
         bne ScoreRowLoop
 
-        ; COLUBK first, right after ScoreRowLoop's last WSYNC, not last:
-        ; HBLANK is only ~22-23 CPU cycles: NUSIZ0/NUSIZ1/COLUP0/COLUP1
-        ; ahead of it (as this block used to be ordered) pushed WallColor's
-        ; write to ~24 cycles in — just past HBLANK — so a sliver of this
-        ; line's visible start still showed the score row's black COLUBK
-        ; before the wall's white took over. Put first, COLUBK lands at
-        ; ~6 cycles, safely inside HBLANK, invisible. The others don't
-        ; have this problem: nothing draws a pixel on this line before
-        ; TopWallLoop's own body clears GRP0/GRP1 below.
+        ; GRP0/GRP1 first, before anything else: ScoreRowLoop's last write
+        ; to them (the digits' own last font row) is still sitting there,
+        ; still at double width and the score colors, until TopWallLoop's
+        ; loop body below gets around to clearing them. Putting COLUBK
+        ; first (see its comment) fixed one bug but caused another: the
+        ; background now turns white almost immediately, while the stale
+        ; digit pattern is still gold/blue for a few more cycles — a
+        ; leftover smear of score color on the wall, its size tracking
+        ; whatever that digit's last row happened to be (confirmed via a
+        ; real screenshot: a gold leak that grew/shrank with the digit
+        ; shown — exactly GRP0's stale pattern). Clearing GRP0/GRP1 here
+        ; makes them harmless (0 renders nothing) regardless of what
+        ; COLUP0/1 or NUSIZ0/1 still hold for the next few cycles.
+        lda #0
+        sta GRP0
+        sta GRP1
+
+        ; COLUBK next, still well inside HBLANK (~22-23 CPU cycles): with
+        ; NUSIZ0/NUSIZ1/COLUP0/COLUP1 ahead of it too (the original order),
+        ; WallColor's write landed at ~24 cycles in — just past HBLANK —
+        ; so a sliver of this line's visible start still showed the score
+        ; row's black COLUBK before the wall's white took over.
         lda WallColor             ; normally COLOR_WHITE, flashes FLASH_COLOR
         sta COLUBK                ; during STATE_GAMEOVER (see VBLANK)
         lda #NUSIZ0_PLAY         ; normal-width P0, keep the net's width
