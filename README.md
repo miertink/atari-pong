@@ -13,8 +13,7 @@ Classic 2-player Pong, playable in the [Stella](https://stella-emu.github.io/)
 emulator or on real Atari 2600 hardware (the ROM is exactly 4096 bytes —
 fits a 2732 EPROM or a flash cart like the Harmony/UnoCart).
 
-- **Two paddles**, one joystick each. Selectable match length — first to
-  5, 15, or 25 points wins.
+- **Two paddles**, one joystick each, first to 5 points wins.
 - **Ball physics with some texture, not just a bouncing square:**
   - Random serve direction *and* angle every point (3 angle profiles ×
     4 quadrants), so no two serves play the same.
@@ -28,9 +27,7 @@ fits a 2732 EPROM or a flash cart like the Harmony/UnoCart).
   the final score up and the background flashing until RESET starts a
   new one — RESET restarts instantly from *any* state, including
   mid-rally, matching how the real console switch behaves.
-- **GAME SELECT does double duty:** a short tap cycles paddle-size
-  difficulty (3 stages), a long hold (~0.75s) instead cycles the match
-  length (5 → 15 → 25 → back to 5).
+- **3-stage paddle-size difficulty**, cycled with GAME SELECT.
 - **Big, classic-scale scoreboard** above the court, a dashed center
   net, and a hit/score beep on the 2600's own sound chip.
 
@@ -40,8 +37,7 @@ fits a 2732 EPROM or a flash cart like the Harmony/UnoCart).
 |---|---|
 | Joystick (left/right port) | Move that side's paddle up/down |
 | GAME RESET | Start a new game / restart instantly at any time |
-| GAME SELECT (tap) | Cycle paddle size (full → 3/4 → 2/3 → full) |
-| GAME SELECT (hold ~0.75s) | Cycle match length (5 → 15 → 25 → 5) |
+| GAME SELECT | Cycle paddle size (full → 3/4 → 2/3 → full) |
 
 ## Running it
 
