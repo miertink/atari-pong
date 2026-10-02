@@ -59,8 +59,6 @@ PADDLE_Y_MIN   = WALL_HT+SCORE_HT  ; lowest valid P0Y/P1Y — paddles can't
 COURT_BOTTOM   = 191-WALL_HT    ; first line of the bottom wall band
 BALL_HT        = 4              ; ball height, in scanlines
 BALL_SIZE      = %00100000      ; CTRLPF: ball width = 4 color clocks
-PF_REFLECT     = %00000001      ; CTRLPF: mirror the playfield onto the
-                                 ; right half — see the center-net note
 COLOR_WHITE    = $0E
 
 ; Ball bounce/score bounds (0-159 horizontal, same scale as SetHorizPos;
@@ -168,24 +166,25 @@ FLASH_PERIOD_MASK = %00010000   ; Frame bit checked to toggle the flash;
 SCORE_P0_COLOR = $9E            ; also the game-over flash color if P0 wins
 SCORE_P1_COLOR = $2E            ; also the game-over flash color if P1 wins
 
-; NUSIZ0 bits 0-2 are player-0 copy/size; bits 4-5 (missile-0 width) are
-; unused now that the net no longer uses M0 (see below) but harmless to
-; leave set.
-NUSIZ0_SCORE   = %00010101      ; double-width P0 (score row)
-NUSIZ0_PLAY    = %00010000      ; normal-width P0 (paddle)
+; NUSIZ0 packs two unrelated things in one register: player-0 copy/size
+; (bits 0-2) and missile-0 width (bits 4-5). Two combined values, since
+; both P0 and the missile-0 net line share it at different points in the
+; frame:
+NUSIZ0_SCORE   = %00010101      ; double-width P0 (score row) + net width
+NUSIZ0_PLAY    = %00010000      ; normal-width P0 (paddle) + net width
 NUSIZ1_SCORE   = %00000101      ; double-width P1 (score row only; P1 has
                                  ; no missile, so no width bits needed)
 
 ; Center net: a dashed vertical line down the middle of the play area
-; (classic tennis-net look), drawn with the playfield (PF2 bit 7), not a
-; missile — M0 shared COLUP0 with P0, which stopped working once P0 got
-; its own paddle color (SCORE_P0_COLOR); the playfield has its own color
-; (COLUPF), unaffected by either player's. With CTRLPF's reflect bit on
-; (see Reset), the LAST of the playfield's 20 bit-positions mirrors onto
-; the right half right at the screen's center, merging into one line —
-; that last position is PF2 bit 7 (PF2's on-screen bit order is
-; reversed: bit0 first, bit7 last), not bit 0 — see MidLoop.
-; Toggled on/off via bit 1 of the scanline counter.
+; (classic tennis-net look), drawn with the otherwise-unused missile 0.
+; Toggled on/off via bit 1 of the scanline counter — 2 lines on, 2 off —
+; which conveniently IS ENAM0's enable bit, so no branching is needed per
+; line (see MidLoop). M0 shares COLUP0 with P0, so the net always tints
+; along with whatever color P0's paddle currently uses — a trade-off,
+; not a bug: the alternative (playfield-based, its own color register)
+; can only draw a line 8 pixels wide at minimum to stay centered, which
+; read as too wide; P0 stays plain white (not SCORE_P0_COLOR) so the net
+; stays plain white too.
 NET_X          = 80             ; horizontal center, same column as the ball
 
 P0_X           = 4              ; left paddle's fixed horizontal position
@@ -295,10 +294,10 @@ Reset
         sta COLUP1
         sta COLUPF
 
-        lda #BALL_SIZE+PF_REFLECT
-        sta CTRLPF               ; ball width + mirrored playfield (net)
+        lda #BALL_SIZE
+        sta CTRLPF
 
-        lda #NUSIZ0_PLAY         ; player width stays
+        lda #NUSIZ0_PLAY         ; missile-0 (net) width; player width stays
         sta NUSIZ0               ; normal until the score row overrides it
 
         lda #0
@@ -350,6 +349,9 @@ Reset
         lda #P1_X
         ldx #1
         jsr SetHorizPos          ; P1
+        lda #NET_X
+        ldx #2
+        jsr SetHorizPos          ; M0 (center net)
         lda #BALL_X_INIT
         ldx #4
         jsr SetHorizPos          ; BL
@@ -782,10 +784,9 @@ ScoreRepeatLoop
         sta NUSIZ0
         lda #0                   ; normal-width P1
         sta NUSIZ1
-        lda #SCORE_P0_COLOR      ; P0's paddle matches its own score digit
-        sta COLUP0                ; (the net, drawn with M0, shares this
-                                 ; register with P0 and tints along with it
-                                 ; — a TIA hardware pairing, not a choice)
+        lda #COLOR_WHITE         ; P0/ball/net go back to white (M0, the
+        sta COLUP0                ; net, shares this register with P0 —
+                                 ; see the center-net note near NET_X)
         lda P1Color              ; normally SCORE_P1_COLOR, AI_COLOR if the
         sta COLUP1                ; AI opponent is on (see VBLANK)
 
@@ -854,24 +855,11 @@ SkipMP1
 SkipMBall
         sta ENABL
 
-        ; center net: 2 lines on / 2 off — bit 1 of the scanline counter
-        ; mapped to PF2 BIT 7, not bit 0 (PF2's on-screen bit order is
-        ; reversed: bit0 is first, bit7 is last — bit7 is the one
-        ; adjacent to center that the reflect bit merges into one line,
-        ; see NET_X's note; bit0, tried first, left two separate dashed
-        ; lines instead of one). Table lookup instead of a branch: same
-        ; worst-case cost either way, not whichever path MidLoop's
-        ; P0/P1/ball checks happen to also take that line — this loop's
-        ; budget is already tight (see the file's zone-separation note).
+        ; center net: 2 lines on / 2 off. Bit 1 of the scanline counter IS
+        ; ENAM0's enable bit, so this needs no branch — see NET_X's note.
         txa
         and #%00000010
-        tay                      ; Y, not X — X is MidLoop's own scanline
-                                 ; counter (cpx P0Y/P1Y/BallY, inx, the
-                                 ; loop's exit test); clobbering it with
-                                 ; TAX here broke the whole loop from this
-                                 ; point on, not just the net
-        lda NetPF2Table,y
-        sta PF2
+        sta ENAM0
 
         sta WSYNC
         inx
@@ -879,7 +867,7 @@ SkipMBall
         bne MidLoop
 
         lda #0
-        sta PF2                  ; net stops at the bottom of the play area
+        sta ENAM0                ; net stops at the bottom of the play area
         lda WallColor             ; normally COLOR_WHITE, flashes the winner's color
         sta COLUBK                ; during STATE_GAMEOVER (see VBLANK)
 BottomWallLoop
@@ -922,7 +910,7 @@ SkipBBall
         sta GRP0
         sta GRP1
         sta ENABL
-        sta PF2
+        sta ENAM0
 
         ; Blank immediately, before the collision response below: its
         ; cost is data-dependent (several extra JSRs on a hit, ~190
@@ -1046,15 +1034,6 @@ BoostThresholdTable
 ; ---------------------------------------------------------------------------
 PaddleHtTable
         .byte PADDLE_HT, (PADDLE_HT*3)/4, 21
-
-; ---------------------------------------------------------------------------
-; NetPF2Table - MidLoop's center-net toggle, indexed by Y = (scanline
-; counter AND %10) — 0 or 2, hence 3 entries with index 1 unused. Y, not
-; X: X is MidLoop's own scanline counter. See the center-net comment in
-; MidLoop for why it's PF2 bit 7 ($80), not bit 0.
-; ---------------------------------------------------------------------------
-NetPF2Table
-        .byte $00,$00,$80
 
 ; ---------------------------------------------------------------------------
 ; DigitFont - 10 digits (0-9) x FONT_ROWS(5) bytes, one byte per row (each
