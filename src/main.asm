@@ -209,7 +209,19 @@ NUSIZ1_SCORE   = %00000101      ; double-width P1 (score row only; P1 has
 ; line (see MidLoop).
 NET_X          = 80             ; horizontal center, same column as the ball
 
-P0_X           = 4              ; left paddle's fixed horizontal position
+; P0_X was 4 (as close to the left edge as P1_X=140 is to the right).
+; EXPERIMENTAL: moved to 12 to test a theory for a small, persistent
+; artifact at the top and bottom wall's left edge (columns 0-8, right
+; where P0's draw-trigger point used to sit, a few pixels wide and a few
+; scanlines tall, confirmed via pixel-scanning real screenshots at two
+; otherwise-unrelated zone transitions — not explained by any register-
+; ordering issue found so far, unlike the earlier COLUBK/VBLANK bugs).
+; P1 (X=140, far from the right edge at 159) shows nothing like it, so
+; the working theory is proximity to the screen edge itself, not
+; anything P0-specific. If this doesn't resolve it, revert to 4 — the
+; paddle/score-digit column shifts together either way, nothing else
+; depends on the exact value.
+P0_X           = 12             ; left paddle's fixed horizontal position
 P1_X           = 140            ; right paddle's fixed horizontal position
 BALL_X_INIT    = 80             ; ball's initial horizontal position (center)
 P0_Y_INIT      = 80             ; left paddle's top (line 0-191); centered
