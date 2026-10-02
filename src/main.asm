@@ -139,12 +139,20 @@ SELECT_HOLD_THRESHOLD    = 45   ; frames (~0.75s @ 60Hz) — long enough that
                                  ; a dead button while waiting for it
 
 ; AI opponent (P1): tracks the ball's vertical center with a small dead
-; zone (avoids jittering exactly on alignment) and ONLY while the ball is
-; heading toward it (BallDX > 0) — when the ball's heading back toward
-; P0, the AI paddle holds still instead of preemptively repositioning,
-; the same deliberate imperfection the original game used to stay
-; beatable rather than tracking the ball perfectly at all times.
+; zone (avoids jittering exactly on alignment), only AFTER the ball has
+; crossed the net onto P1's side (not the instant P0 hits it — waiting
+; for the crossing gives it meaningfully less time to get in position,
+; closer to a human's reaction window), and even then only moves on
+; every other frame (half of PADDLE_SPEED's effective rate) — three
+; separate, deliberate layers of imperfection so it stays beatable
+; instead of tracking the ball perfectly at full speed at all times.
+; COLUP1 also shifts to AI_COLOR while AIMode is on, so it's visible at
+; a glance which side (if either) is computer-controlled.
 AI_DEADZONE = 4                 ; scanlines of slack around dead-on alignment
+AI_COLOR = $46                  ; P1's color while AI-controlled — a red,
+                                 ; clearly different from the paddles'
+                                 ; usual white; easy to retune if it
+                                 ; doesn't read as intended on screen
 
 ; Serve angle: 3 profiles, picked by FREQUENCY (which axis, if any, skips
 ; odd frames) rather than by step magnitude — magnitude-based profiles
@@ -313,6 +321,11 @@ P1Input ds 1                    ; this frame's P1 up/down bits, bit0=up/
                                  ; ComputeAIInput's ball tracking
 AIBallCenter ds 1                ; scratch: this frame's ball/paddle
 AIPaddleCenter ds 1               ; vertical centers (ComputeAIInput only)
+P1Color ds 1                     ; this frame's COLUP1 — COLOR_WHITE
+                                 ; normally, AI_COLOR while AIMode is on;
+                                 ; computed once in VBLANK (same pattern
+                                 ; as WallColor/CourtColor), just read by
+                                 ; the kernel
 
         SEG code
         ORG $F000
@@ -427,6 +440,17 @@ MainLoop
         jsr CheckStartButton     ; GAME RESET: (re)starts the game from ANY
                                  ; state — always checked, regardless of
                                  ; GameState
+
+        ; --- P1's color: COLOR_WHITE normally, AI_COLOR while AIMode is
+        ; on, so the AI opponent is visible at a glance (see the
+        ; constants note near AI_DEADZONE). Same precompute-in-VBLANK
+        ; pattern as WallColor/CourtColor below.
+        lda #COLOR_WHITE
+        ldx AIMode
+        beq P1ColorDone
+        lda #AI_COLOR
+P1ColorDone
+        sta P1Color
 
         ; --- game-over background flash: WallColor/CourtColor default to
         ; the normal wall(white)/court(black) colors and are just read by
@@ -812,9 +836,10 @@ ScoreRepeatLoop
         sta NUSIZ0
         lda #0                   ; normal-width P1
         sta NUSIZ1
-        lda #COLOR_WHITE         ; paddles/ball/net go back to white
+        lda #COLOR_WHITE         ; P0/ball/net go back to white
         sta COLUP0
-        sta COLUP1
+        lda P1Color              ; normally white too — AI_COLOR if the
+        sta COLUP1                ; AI opponent is on (see VBLANK)
 
         ; --- top wall: WALL_HT lines, right below the score row ---
         ldx #SCORE_HT            ; ScoreRowLoop counted rows with Y, not X
@@ -1359,18 +1384,35 @@ SelectSettingsDone
 
 ; ---------------------------------------------------------------------------
 ; ComputeAIInput - the AI opponent's "virtual joystick" for P1. Tracks the
-; ball's vertical center with a small dead zone (AI_DEADZONE), and only
-; while the ball is heading toward P1 (BallDX > 0) — see the constants
-; note near AI_DEADZONE for why. Writes P1Input in the same bit0=up/
-; bit1=down, active-low format as SWCHA's P1 bits, so the P1 movement
-; code that reads it afterward doesn't need to know this isn't a real
-; joystick.
+; ball's vertical center with a small dead zone (AI_DEADZONE); see the
+; constants note near AI_DEADZONE for the three layers of deliberate
+; imperfection this applies (net-crossing gate, half-speed reaction, the
+; dead zone itself). Writes P1Input in the same bit0=up/bit1=down,
+; active-low format as SWCHA's P1 bits, so the P1 movement code that
+; reads it afterward doesn't need to know this isn't a real joystick.
 ; ---------------------------------------------------------------------------
 ComputeAIInput
         lda #%00000011           ; default: both released, no movement
         sta P1Input
         lda BallDX
         bmi ComputeAIInputDone   ; ball heading toward P0 -> don't chase
+
+        lda BallX
+        cmp #NET_X
+        bcc ComputeAIInputDone   ; ball hasn't reached the net yet -> wait
+                                 ; for it to cross onto P1's side instead
+                                 ; of reacting the instant P0 hits it
+
+        lda Frame
+        and #1
+        bne ComputeAIInputDone  ; half-speed reaction: P1Input was just
+                                 ; reset to "both released" above, so an
+                                 ; odd frame always holds still here —
+                                 ; stutter-stepping (move, stop, move,
+                                 ; stop...) halves the average speed
+                                 ; without needing a second PADDLE_SPEED
+                                 ; constant or touching the shared P1
+                                 ; movement code at all
 
         lda BallY
         clc
