@@ -865,8 +865,12 @@ SkipMBall
         ; budget is already tight (see the file's zone-separation note).
         txa
         and #%00000010
-        tax
-        lda NetPF2Table,x
+        tay                      ; Y, not X — X is MidLoop's own scanline
+                                 ; counter (cpx P0Y/P1Y/BallY, inx, the
+                                 ; loop's exit test); clobbering it with
+                                 ; TAX here broke the whole loop from this
+                                 ; point on, not just the net
+        lda NetPF2Table,y
         sta PF2
 
         sta WSYNC
@@ -1044,8 +1048,9 @@ PaddleHtTable
         .byte PADDLE_HT, (PADDLE_HT*3)/4, 21
 
 ; ---------------------------------------------------------------------------
-; NetPF2Table - MidLoop's center-net toggle, indexed by (X AND %10) — 0 or
-; 2, hence 3 entries with index 1 unused. See the center-net comment in
+; NetPF2Table - MidLoop's center-net toggle, indexed by Y = (scanline
+; counter AND %10) — 0 or 2, hence 3 entries with index 1 unused. Y, not
+; X: X is MidLoop's own scanline counter. See the center-net comment in
 ; MidLoop for why it's PF2 bit 7 ($80), not bit 0.
 ; ---------------------------------------------------------------------------
 NetPF2Table
