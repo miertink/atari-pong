@@ -98,10 +98,7 @@ SELECT_HOLD_THRESHOLD    = 45   ; ~0.75s @ 60Hz
 ; only once the ball crosses the net onto P1's side, at 2/3 of
 ; PADDLE_SPEED — see ComputeAIInput. COLUP1 shifts to AI_COLOR while on.
 AI_DEADZONE = 4                 ; scanlines of slack around alignment
-AI_COLOR = $C4                  ; P1's color while AI-controlled — a
-                                 ; dark green, distinct from both score
-                                 ; colors; red ($46) read as too
-                                 ; aggressive
+AI_COLOR = $2E                  ; P1's color while AI-controlled
 
 ; Serve angle: 3 profiles, picked by FREQUENCY (which axis, if any, skips
 ; odd frames) rather than by step magnitude — magnitude-based profiles
@@ -155,8 +152,6 @@ SCORE_TO_WIN   = 5
 STATE_ATTRACT  = 0
 STATE_PLAYING  = 1
 STATE_GAMEOVER = 2
-FLASH_COLOR      = $3A          ; vivid red/orange — just needs to read
-                                 ; clearly as "different from black/white"
 FLASH_PERIOD_MASK = %00010000   ; Frame bit checked to toggle the flash;
                                  ; this bit flips every 16 frames, giving
                                  ; a full on/off cycle every ~0.53s — slow
@@ -166,8 +161,8 @@ FLASH_PERIOD_MASK = %00010000   ; Frame bit checked to toggle the flash;
 ; Score digits use their own colors (not the paddle/ball white) — COLUP0/
 ; COLUP1 swapped in for the score row only, then restored. Exact hues are
 ; easy to retune here if they don't read as intended on screen.
-SCORE_P0_COLOR = $2E            ; warm orange/gold
-SCORE_P1_COLOR = $9E            ; cool blue
+SCORE_P0_COLOR = $9E            ; also the game-over flash color if P0 wins
+SCORE_P1_COLOR = $2E            ; also the game-over flash color if P1 wins
 
 ; NUSIZ0 packs two unrelated things in one register: player-0 copy/size
 ; (bits 0-2) and missile-0 width (bits 4-5). Two combined values, since
@@ -256,8 +251,9 @@ GameState ds 1                  ; STATE_ATTRACT/PLAYING/GAMEOVER — gates
 WallColor ds 1                  ; this frame's COLUBK for the wall zones
 CourtColor ds 1                  ; this frame's COLUBK for the court zone —
                                  ; both computed once in VBLANK (normally
-                                 ; white/black, flashing FLASH_COLOR during
-                                 ; STATE_GAMEOVER), just read by the kernel
+                                 ; white/black, flashing the winner's score
+                                 ; color during STATE_GAMEOVER), just read
+                                 ; by the kernel
 AIMode ds 1                     ; 0 = P1 is joystick-controlled (2 players,
                                  ; the default), 1 = P1 is computer-
                                  ; controlled — toggled by a GAME SELECT
@@ -406,7 +402,10 @@ P1ColorDone
         ; the kernel below (see their RAM comment) — kept out of the
         ; cycle-tight visible-area code, computed once here instead where
         ; the hardware timer already absorbs any extra cost (see the
-        ; header note on VBLANK timing).
+        ; header note on VBLANK timing). The flash itself uses the
+        ; winning player's own score color, not a fixed hue — whoever's
+        ; score reads SCORE_TO_WIN is the winner (ScoreP0 checked first;
+        ; both never hit it the same frame).
         lda #COLOR_WHITE
         sta WallColor
         lda #0
@@ -417,7 +416,12 @@ P1ColorDone
         lda Frame
         and #FLASH_PERIOD_MASK
         beq ColorsDone           ; this half of the flash cycle: stay normal
-        lda #FLASH_COLOR
+        lda #SCORE_P0_COLOR
+        ldx ScoreP0
+        cpx #SCORE_TO_WIN
+        beq FlashColorPicked
+        lda #SCORE_P1_COLOR
+FlashColorPicked
         sta WallColor
         sta CourtColor
 ColorsDone
@@ -763,7 +767,7 @@ ScoreRepeatLoop
         sta GRP0
         sta GRP1
 
-        lda WallColor             ; normally COLOR_WHITE, flashes FLASH_COLOR
+        lda WallColor             ; normally COLOR_WHITE, flashes the winner's color
         sta COLUBK                ; during STATE_GAMEOVER (see VBLANK)
         lda #NUSIZ0_PLAY         ; normal-width P0, keep the net's width
         sta NUSIZ0
@@ -809,7 +813,7 @@ SkipTBall
         cpx #SCORE_HT+WALL_HT
         bne TopWallLoop
 
-        lda CourtColor            ; normally black, flashes FLASH_COLOR
+        lda CourtColor            ; normally black, flashes the winner's color
         sta COLUBK                ; during STATE_GAMEOVER (see VBLANK)
 MidLoop
         lda #0
@@ -852,7 +856,7 @@ SkipMBall
 
         lda #0
         sta ENAM0                ; net stops at the bottom of the play area
-        lda WallColor             ; normally COLOR_WHITE, flashes FLASH_COLOR
+        lda WallColor             ; normally COLOR_WHITE, flashes the winner's color
         sta COLUBK                ; during STATE_GAMEOVER (see VBLANK)
 BottomWallLoop
         lda #0
