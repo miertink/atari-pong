@@ -140,14 +140,13 @@ SELECT_HOLD_THRESHOLD    = 45   ; frames (~0.75s @ 60Hz) — long enough that
 
 ; AI opponent (P1): tracks the ball's vertical center with a small dead
 ; zone (avoids jittering exactly on alignment), only AFTER the ball has
-; crossed the net onto P1's side (not the instant P0 hits it — waiting
+; crossed the net onto P1's side — not the instant P0 hits it; waiting
 ; for the crossing gives it meaningfully less time to get in position,
-; closer to a human's reaction window), and even then only moves on
-; every other frame (half of PADDLE_SPEED's effective rate) — three
-; separate, deliberate layers of imperfection so it stays beatable
-; instead of tracking the ball perfectly at full speed at all times.
-; COLUP1 also shifts to AI_COLOR while AIMode is on, so it's visible at
-; a glance which side (if either) is computer-controlled.
+; closer to a human's reaction window, and is the current difficulty
+; tuning (a half-speed reaction was tried on top of this and made it too
+; easy — see ComputeAIInput's comment). Full PADDLE_SPEED once it IS
+; reacting. COLUP1 also shifts to AI_COLOR while AIMode is on, so it's
+; visible at a glance which side (if either) is computer-controlled.
 AI_DEADZONE = 4                 ; scanlines of slack around dead-on alignment
 AI_COLOR = $46                  ; P1's color while AI-controlled — a red,
                                  ; clearly different from the paddles'
@@ -1402,17 +1401,12 @@ ComputeAIInput
         bcc ComputeAIInputDone   ; ball hasn't reached the net yet -> wait
                                  ; for it to cross onto P1's side instead
                                  ; of reacting the instant P0 hits it
-
-        lda Frame
-        and #1
-        bne ComputeAIInputDone  ; half-speed reaction: P1Input was just
-                                 ; reset to "both released" above, so an
-                                 ; odd frame always holds still here —
-                                 ; stutter-stepping (move, stop, move,
-                                 ; stop...) halves the average speed
-                                 ; without needing a second PADDLE_SPEED
-                                 ; constant or touching the shared P1
-                                 ; movement code at all
+                                 ; (the combination of this gate AND a
+                                 ; half-speed reaction, tried first, made
+                                 ; it too easy — this gate alone is the
+                                 ; current tuning; full PADDLE_SPEED once
+                                 ; it IS reacting, see the P1 movement
+                                 ; code below)
 
         lda BallY
         clc
