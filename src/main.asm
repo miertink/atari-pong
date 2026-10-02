@@ -98,7 +98,9 @@ SELECT_HOLD_THRESHOLD    = 45   ; ~0.75s @ 60Hz
 ; only once the ball crosses the net onto P1's side, at 2/3 of
 ; PADDLE_SPEED — see ComputeAIInput. COLUP1 shifts to AI_COLOR while on.
 AI_DEADZONE = 4                 ; scanlines of slack around alignment
-AI_COLOR = $2E                  ; P1's color while AI-controlled
+AI_COLOR = $46                  ; P1's color while AI-controlled — red,
+                                 ; replacing SCORE_P1_COLOR's orange both
+                                 ; on the paddle and the score digit
 
 ; Serve angle: 3 profiles, picked by FREQUENCY (which axis, if any, skips
 ; odd frames) rather than by step magnitude — magnitude-based profiles
@@ -386,11 +388,12 @@ MainLoop
                                  ; state — always checked, regardless of
                                  ; GameState
 
-        ; --- P1's color: COLOR_WHITE normally, AI_COLOR while AIMode is
-        ; on, so the AI opponent is visible at a glance (see the
-        ; constants note near AI_DEADZONE). Same precompute-in-VBLANK
-        ; pattern as WallColor/CourtColor below.
-        lda #COLOR_WHITE
+        ; --- P1's color: SCORE_P1_COLOR normally (paddle matches its own
+        ; score digit), AI_COLOR while AIMode is on — so the AI opponent
+        ; is visible at a glance, same hue in both the court and the
+        ; score row (see the constants note near AI_DEADZONE). Same
+        ; precompute-in-VBLANK pattern as WallColor/CourtColor below.
+        lda #SCORE_P1_COLOR
         ldx AIMode
         beq P1ColorDone
         lda #AI_COLOR
@@ -403,9 +406,12 @@ P1ColorDone
         ; cycle-tight visible-area code, computed once here instead where
         ; the hardware timer already absorbs any extra cost (see the
         ; header note on VBLANK timing). The flash itself uses the
-        ; winning player's own score color, not a fixed hue — whoever's
-        ; score reads SCORE_TO_WIN is the winner (ScoreP0 checked first;
-        ; both never hit it the same frame).
+        ; winning player's own color, not a fixed hue — whoever's score
+        ; reads SCORE_TO_WIN is the winner (ScoreP0 checked first, both
+        ; never hit it the same frame). P1Color (just computed above) is
+        ; reused here as P1's win color, so a P1 win flashes AI_COLOR
+        ; instead of SCORE_P1_COLOR when the AI opponent is the one that
+        ; actually won.
         lda #COLOR_WHITE
         sta WallColor
         lda #0
@@ -420,7 +426,7 @@ P1ColorDone
         ldx ScoreP0
         cpx #SCORE_TO_WIN
         beq FlashColorPicked
-        lda #SCORE_P1_COLOR
+        lda P1Color
 FlashColorPicked
         sta WallColor
         sta CourtColor
@@ -736,8 +742,8 @@ BallMoveDone
         sta NUSIZ1
         lda #SCORE_P0_COLOR
         sta COLUP0
-        lda #SCORE_P1_COLOR
-        sta COLUP1
+        lda P1Color              ; normally SCORE_P1_COLOR, AI_COLOR if
+        sta COLUP1                ; the AI opponent is on (see VBLANK)
 
         lda #0
         sta COLUBK
@@ -773,9 +779,11 @@ ScoreRepeatLoop
         sta NUSIZ0
         lda #0                   ; normal-width P1
         sta NUSIZ1
-        lda #COLOR_WHITE         ; P0/ball/net go back to white
-        sta COLUP0
-        lda P1Color              ; normally white too — AI_COLOR if the
+        lda #SCORE_P0_COLOR      ; P0's paddle matches its own score digit
+        sta COLUP0                ; (the net, drawn with M0, shares this
+                                 ; register with P0 and tints along with it
+                                 ; — a TIA hardware pairing, not a choice)
+        lda P1Color              ; normally SCORE_P1_COLOR, AI_COLOR if the
         sta COLUP1                ; AI opponent is on (see VBLANK)
 
         ; --- top wall: WALL_HT lines, right below the score row ---
