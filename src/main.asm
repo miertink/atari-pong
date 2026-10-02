@@ -325,6 +325,9 @@ P1Color ds 1                     ; this frame's COLUP1 — COLOR_WHITE
                                  ; computed once in VBLANK (same pattern
                                  ; as WallColor/CourtColor), just read by
                                  ; the kernel
+AISkipCounter ds 1               ; cycles 0..2 while the AI is reacting —
+                                 ; skips moving on the 3rd frame, giving
+                                 ; it 2/3 of PADDLE_SPEED's rate on average
 
         SEG code
         ORG $F000
@@ -1401,12 +1404,21 @@ ComputeAIInput
         bcc ComputeAIInputDone   ; ball hasn't reached the net yet -> wait
                                  ; for it to cross onto P1's side instead
                                  ; of reacting the instant P0 hits it
-                                 ; (the combination of this gate AND a
-                                 ; half-speed reaction, tried first, made
-                                 ; it too easy — this gate alone is the
-                                 ; current tuning; full PADDLE_SPEED once
-                                 ; it IS reacting, see the P1 movement
-                                 ; code below)
+
+        ; Speed: 2 of every 3 reacting frames move, the 3rd is skipped —
+        ; giving 2/3 of PADDLE_SPEED's rate on average. Splits the
+        ; difference between the two extremes already tried and found
+        ; wrong: this gate alone at FULL speed was still too hard, and
+        ; adding a flat HALF-speed stutter on top of it was too easy.
+        inc AISkipCounter
+        lda AISkipCounter
+        cmp #3
+        bne AISkipCheckDone
+        lda #0
+        sta AISkipCounter
+AISkipCheckDone
+        lda AISkipCounter
+        beq ComputeAIInputDone   ; the skipped 1-in-3 frame
 
         lda BallY
         clc
