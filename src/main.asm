@@ -59,6 +59,8 @@ PADDLE_Y_MIN   = WALL_HT+SCORE_HT  ; lowest valid P0Y/P1Y — paddles can't
 COURT_BOTTOM   = 191-WALL_HT    ; first line of the bottom wall band
 BALL_HT        = 4              ; ball height, in scanlines
 BALL_SIZE      = %00100000      ; CTRLPF: ball width = 4 color clocks
+PF_REFLECT     = %00000001      ; CTRLPF: mirror the playfield onto the
+                                 ; right half — see the center-net note
 COLOR_WHITE    = $0E
 
 ; Ball bounce/score bounds (0-159 horizontal, same scale as SetHorizPos;
@@ -166,20 +168,23 @@ FLASH_PERIOD_MASK = %00010000   ; Frame bit checked to toggle the flash;
 SCORE_P0_COLOR = $9E            ; also the game-over flash color if P0 wins
 SCORE_P1_COLOR = $2E            ; also the game-over flash color if P1 wins
 
-; NUSIZ0 packs two unrelated things in one register: player-0 copy/size
-; (bits 0-2) and missile-0 width (bits 4-5). Two combined values, since
-; both P0 and the missile-0 net line share it at different points in the
-; frame:
-NUSIZ0_SCORE   = %00010101      ; double-width P0 (score row) + net width
-NUSIZ0_PLAY    = %00010000      ; normal-width P0 (paddle) + net width
+; NUSIZ0 bits 0-2 are player-0 copy/size; bits 4-5 (missile-0 width) are
+; unused now that the net no longer uses M0 (see below) but harmless to
+; leave set.
+NUSIZ0_SCORE   = %00010101      ; double-width P0 (score row)
+NUSIZ0_PLAY    = %00010000      ; normal-width P0 (paddle)
 NUSIZ1_SCORE   = %00000101      ; double-width P1 (score row only; P1 has
                                  ; no missile, so no width bits needed)
 
 ; Center net: a dashed vertical line down the middle of the play area
-; (classic tennis-net look), drawn with the otherwise-unused missile 0.
+; (classic tennis-net look), drawn with the playfield (PF2 bit 0), not a
+; missile — M0 shared COLUP0 with P0, which stopped working once P0 got
+; its own paddle color (SCORE_P0_COLOR); the playfield has its own color
+; (COLUPF), unaffected by either player's. With CTRLPF's reflect bit on
+; (see Reset), PF2's last bit mirrors onto the right half exactly at the
+; screen's center, so a single bit is enough for a centered line.
 ; Toggled on/off via bit 1 of the scanline counter — 2 lines on, 2 off —
-; which conveniently IS ENAM0's enable bit, so no branching is needed per
-; line (see MidLoop).
+; shifted down to bit 0 for PF2 (see MidLoop).
 NET_X          = 80             ; horizontal center, same column as the ball
 
 P0_X           = 4              ; left paddle's fixed horizontal position
@@ -289,10 +294,10 @@ Reset
         sta COLUP1
         sta COLUPF
 
-        lda #BALL_SIZE
-        sta CTRLPF
+        lda #BALL_SIZE+PF_REFLECT
+        sta CTRLPF               ; ball width + mirrored playfield (net)
 
-        lda #NUSIZ0_PLAY         ; missile-0 (net) width; player width stays
+        lda #NUSIZ0_PLAY         ; player width stays
         sta NUSIZ0               ; normal until the score row overrides it
 
         lda #0
@@ -344,9 +349,6 @@ Reset
         lda #P1_X
         ldx #1
         jsr SetHorizPos          ; P1
-        lda #NET_X
-        ldx #2
-        jsr SetHorizPos          ; M0 (center net)
         lda #BALL_X_INIT
         ldx #4
         jsr SetHorizPos          ; BL
@@ -851,11 +853,13 @@ SkipMP1
 SkipMBall
         sta ENABL
 
-        ; center net: 2 lines on / 2 off. Bit 1 of the scanline counter IS
-        ; ENAM0's enable bit, so this needs no branch — see NET_X's note.
+        ; center net: 2 lines on / 2 off — bit 1 of the scanline counter,
+        ; shifted down to bit 0 for PF2 (see NET_X's note). No branch
+        ; needed either way.
         txa
         and #%00000010
-        sta ENAM0
+        lsr
+        sta PF2
 
         sta WSYNC
         inx
@@ -863,7 +867,7 @@ SkipMBall
         bne MidLoop
 
         lda #0
-        sta ENAM0                ; net stops at the bottom of the play area
+        sta PF2                  ; net stops at the bottom of the play area
         lda WallColor             ; normally COLOR_WHITE, flashes the winner's color
         sta COLUBK                ; during STATE_GAMEOVER (see VBLANK)
 BottomWallLoop
@@ -906,7 +910,7 @@ SkipBBall
         sta GRP0
         sta GRP1
         sta ENABL
-        sta ENAM0
+        sta PF2
 
         ; Blank immediately, before the collision response below: its
         ; cost is data-dependent (several extra JSRs on a hit, ~190
