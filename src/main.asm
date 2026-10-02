@@ -98,7 +98,10 @@ SELECT_HOLD_THRESHOLD    = 45   ; ~0.75s @ 60Hz
 ; only once the ball crosses the net onto P1's side, at 2/3 of
 ; PADDLE_SPEED — see ComputeAIInput. COLUP1 shifts to AI_COLOR while on.
 AI_DEADZONE = 4                 ; scanlines of slack around alignment
-AI_COLOR = $46                  ; P1's color while AI-controlled
+AI_COLOR = $C4                  ; P1's color while AI-controlled — a
+                                 ; dark green, distinct from both score
+                                 ; colors; red ($46) read as too
+                                 ; aggressive
 
 ; Serve angle: 3 profiles, picked by FREQUENCY (which axis, if any, skips
 ; odd frames) rather than by step magnitude — magnitude-based profiles
