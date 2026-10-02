@@ -1,82 +1,46 @@
-; Pong for Atari 2600 (NTSC)
+; Pong for Atari 2600 (NTSC). 6502 assembly, no engine — a hand-timed
+; kernel building the image scanline by scanline.
 ;
-; Current state: Marco 0 complete (paddles, ball, wall bounce, hardware
-; collision, scoring, sound, randomized serve).
-;   - P0/P1 (paddles): joystick moves them vertically; horizontal position
-;     fixed, set once in Reset.
-;   - BL (ball): moves, bounces off the walls, collides with paddles via
-;     hardware, and awards a point when it passes a paddle uncontested.
-;     Speed has two phases: BALL_SERVE_SPEED at serve, a step up to rally
-;     speed on the first paddle hit. Rally speed then creeps up 10% every
-;     HITS_PER_LEVEL hits (LevelSpeedTable), capped at MAX_HIT_LEVEL —
-;     with PADDLE_SPEED only 1 above the starting rally speed, there's no
-;     integer room for more than one real step before the ball would
-;     reach the paddle's own speed, so growth stops there (see the
-;     constants note near HITS_PER_LEVEL). Serve direction and angle are
-;     randomized (8-bit LFSR); a moving paddle at the moment of contact
-;     nudges the ball's vertical angle (English/spin). The speed
-;     progression resets on every point (ResetBall), not just a match
-;     win — each rally starts back at BALL_SERVE_SPEED.
-;   - Score (ScoreP0/ScoreP1) shown on screen (DigitFont); reaching
-;     SCORE_TO_WIN freezes the game (GameState=STATE_GAMEOVER) with the
-;     final score held on screen and the background flashing, rather than
-;     resetting immediately — see GameState below.
-;   - GameState (STATE_ATTRACT/PLAYING/GAMEOVER): mirrors real Atari 2600
-;     convention. At power-up (STATE_ATTRACT) and after a match ends
-;     (STATE_GAMEOVER, background flashing), paddles/ball are frozen —
-;     only GAME RESET (SWCHB bit 0) does anything, and it always
-;     (re)starts a fresh game immediately: 0/0 score, a new random serve,
-;     GameState=STATE_PLAYING. This is true in ANY state, including mid-
-;     rally — real GAME RESET switches restart the game outright, they
-;     don't ask for confirmation. GAME SELECT (bit 1) does double duty by
-;     press DURATION rather than needing a second switch: a short tap
-;     cycles paddle-size difficulty, a long hold instead toggles the AI
-;     opponent for P1 — see AdvanceSelectSettings/CheckStartButton.
-;   - AIMode: when on, P1 is computer-controlled (ComputeAIInput) instead
-;     of reading the second joystick — tracks the ball's vertical center
-;     with a dead zone, only while the ball is heading toward it, the
-;     same deliberate imperfection the original game used to stay
-;     beatable. Off by default (2 players).
+; 2 players (joystick each) or 1 vs. AI (GAME SELECT: tap = paddle size,
+; hold = toggle AI opponent for P1). GAME RESET (re)starts instantly,
+; from any state. Ball: random serve angle/direction, a stepped speed
+; ramp per rally that resets every point, paddle "English" on contact.
+; GameState freezes play outside STATE_PLAYING (attract screen at power-
+; up; game-over holds the final score and flashes the background until
+; the next RESET).
 ;
 ; Engineering notes worth keeping in mind when touching this code:
 ;
-; - VBLANK timing uses the RIOT hardware timer (TIMER_SETUP/TIMER_WAIT from
-;   macro.h) instead of hand-counted WSYNCs. SetHorizPos's cost depends on
-;   its input (divide-by-15 loop): ~30 cycles for small X, >80 for X near
-;   150-159 — over the 76-cycle/scanline budget if counted by hand. The
-;   timer absorbs that variance automatically.
+; - VBLANK and Overscan both use the RIOT hardware timer (TIMER_SETUP/
+;   TIMER_WAIT) instead of hand-counted WSYNCs: their contents have data-
+;   dependent cost (SetHorizPos's divide loop; the hit-collision
+;   response's extra JSRs on a hit) that hand-counting would under-budget.
 ;
-; - HMOVE must be strobed right after a WSYNC (hardware requirement, ~24
-;   cycle window) — not just a matter of budget. Skipping this once made
-;   the paddles drift sideways on their own.
+; - HMOVE must be strobed right after a WSYNC (hardware requirement).
+;   HMCLR must NOT follow HMOVE immediately for an object still moving —
+;   the fine-motion injection isn't instantaneous, and clearing it too
+;   soon truncates it.
 ;
-; - HMCLR must NOT be strobed immediately (3 cycles) after HMOVE for an
-;   object that keeps moving: the fine-motion injection isn't
-;   instantaneous, and clearing HMBL too soon truncates it, leaving only
-;   the coarse RESBL reposition — the ball "galloped" in ~15-unit jumps
-;   instead of sliding. Fixed by dropping HMCLR from the ball's per-frame
-;   reposition (HMBL gets overwritten fresh next frame anyway) and adding
-;   slack before it in Reset (where it's still needed once, to zero
-;   HMP0/HMP1 so the ball's later HMOVE calls don't reapply them).
+; - A COLUBK or VBLANK write partway through a scanline splits that line
+;   visibly at the exact color clock it lands on. Keep such writes early
+;   in a zone transition, inside HBLANK (~22-23 CPU cycles from the
+;   WSYNC that started the line).
 ;
-; - Bounce/score bounds are checked with inequalities (>=/<=), not exact
-;   equality: BallX/BallY can take different step sizes during the game
-;   (serve vs. rally speed, skip-frame angle), so an exact-match boundary
-;   check would occasionally get stepped over and missed.
+; - Bounds are checked with inequalities (>=/<=), not exact equality —
+;   BallX/BallY can take different step sizes, so an exact match can get
+;   stepped over and missed.
 
         processor 6502
         include "vcs.h"
         include "macro.h"
 
 ; ---- Geometry / color constants ----
-PADDLE_HT      = 32             ; ORIGINAL (full-size) paddle height, in
-                                 ; scanlines — used only as PaddleHtTable's
-                                 ; stage-0 entry and PaddleHt's initial
-                                 ; value in Reset. The CURRENT height is
-                                 ; the runtime value PaddleHt (RAM), which
-                                 ; the GAME SELECT switch cycles through
-                                 ; PaddleHtTable (see the difficulty note
-                                 ; further down and AdvanceSelectSettings).
+PADDLE_HT      = 32             ; full-size height, in scanlines —
+                                 ; PaddleHtTable's stage-0 entry and
+                                 ; PaddleHt's initial value. CURRENT
+                                 ; height is the runtime PaddleHt (RAM),
+                                 ; cycled by a GAME SELECT tap (see
+                                 ; AdvanceSelectSettings).
 PADDLE_PATTERN = %00111100      ; paddle bit pattern (GRP0/GRP1)
 PADDLE_SPEED   = 3              ; scanlines/frame while holding the joystick
 FONT_ROWS      = 5              ; DigitFont height, in raw font rows
@@ -122,36 +86,19 @@ BALL_RALLY_SPEED = 2
 HITS_PER_LEVEL = 5
 MAX_HIT_LEVEL  = 7              ; LevelSpeedTable has MAX_HIT_LEVEL+1 entries
 
-; Difficulty AND the AI opponent share the GAME SELECT console switch
-; (SWCHB bit 1, active low), split by press duration rather than needing
-; a second switch: a short TAP cycles the paddle height through 3 stages
-; (full -> 3/4 -> 2/3 -> back to full, PaddleHtTable); a LONG HOLD
-; (released only after SELECT_HOLD_THRESHOLD frames) instead toggles
-; AIMode (P1: joystick <-> computer-controlled). Both decisions are made
-; on RELEASE, once the hold duration is known (AdvanceSelectSettings
-; tracks it in SelectHoldFrames while the switch is down). GAME RESET
-; (bit 0) is reserved for starting/restarting the game — see
-; CheckStartButton — so the two switches don't step on each other.
+; Difficulty and the AI opponent share GAME SELECT (SWCHB bit 1), split
+; by press duration: a short tap cycles paddle height (PaddleHtTable, 3
+; stages), a long hold (SELECT_HOLD_THRESHOLD frames) toggles AIMode
+; instead — see AdvanceSelectSettings. GAME RESET (bit 0) starts/
+; restarts the game — see CheckStartButton.
 PADDLE_DIFFICULTY_STAGES = 3
-SELECT_HOLD_THRESHOLD    = 45   ; frames (~0.75s @ 60Hz) — long enough that
-                                 ; an ordinary tap never accidentally reads
-                                 ; as a hold, short enough not to feel like
-                                 ; a dead button while waiting for it
+SELECT_HOLD_THRESHOLD    = 45   ; ~0.75s @ 60Hz
 
-; AI opponent (P1): tracks the ball's vertical center with a small dead
-; zone (avoids jittering exactly on alignment), only AFTER the ball has
-; crossed the net onto P1's side — not the instant P0 hits it; waiting
-; for the crossing gives it meaningfully less time to get in position,
-; closer to a human's reaction window, and is the current difficulty
-; tuning (a half-speed reaction was tried on top of this and made it too
-; easy — see ComputeAIInput's comment). Full PADDLE_SPEED once it IS
-; reacting. COLUP1 also shifts to AI_COLOR while AIMode is on, so it's
-; visible at a glance which side (if either) is computer-controlled.
-AI_DEADZONE = 4                 ; scanlines of slack around dead-on alignment
-AI_COLOR = $46                  ; P1's color while AI-controlled — a red,
-                                 ; clearly different from the paddles'
-                                 ; usual white; easy to retune if it
-                                 ; doesn't read as intended on screen
+; AI opponent (P1): tracks the ball's vertical center with a dead zone,
+; only once the ball crosses the net onto P1's side, at 2/3 of
+; PADDLE_SPEED — see ComputeAIInput. COLUP1 shifts to AI_COLOR while on.
+AI_DEADZONE = 4                 ; scanlines of slack around alignment
+AI_COLOR = $46                  ; P1's color while AI-controlled
 
 ; Serve angle: 3 profiles, picked by FREQUENCY (which axis, if any, skips
 ; odd frames) rather than by step magnitude — magnitude-based profiles
@@ -372,12 +319,9 @@ Reset
         lda #$2B
         sta RandomSeed
 
-        ; Prime both switch-edge trackers from the actual current switch
-        ; state, rather than leaving them at CLEAN_START's zero — otherwise
-        ; a switch that happens to be released (non-zero bit) at power-up
-        ; would look like a fake "just-released" edge on frame 1 (harmless,
-        ; release edges are ignored, but priming is one instruction and
-        ; removes the question entirely).
+        ; Prime both switch-edge trackers from the real switch state
+        ; instead of CLEAN_START's zero, so a released switch at power-up
+        ; can't look like a fake edge on frame 1.
         lda SWCHB
         and #%00000001
         sta PrevResetState
@@ -737,21 +681,16 @@ BallMoveDone
         sta VBLANK
 
         ; --- Visible area: 192 lines, in 4 zones (score row / top wall /
-        ; middle / bottom wall). The score sits in its own row above the
-        ; top wall, outside the court, rather than inside it: with the
-        ; score inside the (otherwise fully black) court, there was no
-        ; visual cue for where the paddles' reach actually stops, which
-        ; read as confusing — the wall line now marks that boundary
-        ; clearly. The walls are just background color (COLUBK), not real
-        ; objects — no hardware collision with the ball (bouncing near
-        ; them is handled via BALL_Y_MIN/MAX in the VBLANK move block).
+        ; middle / bottom wall). The score row sits above the court, not
+        ; inside it, so the wall line marks where the paddles' reach
+        ; stops. Walls are just background color (COLUBK), not real
+        ; objects — bouncing near them is handled via BALL_Y_MIN/MAX in
+        ; the VBLANK move block.
         ;
-        ; Why separate zones instead of checking "which zone is this line
-        ; in?" inside a single loop: that costs extra cycles per line,
-        ; blowing the 76-cycle/scanline budget on top of paddles+ball
-        ; (~61, already tight). Each zone fixes its own per-line behavior
-        ; once, outside its loop, and the shared body (~61 cycles) stays
-        ; unchanged, just repeated in source.
+        ; Separate zones instead of one loop checking "which zone is this
+        ; line": that per-line check would blow the 76-cycle budget on
+        ; top of paddles+ball (~61, already tight). Each zone sets its
+        ; own per-line behavior once, outside its loop.
         inc Frame
 
         ; --- score row: SCORE_HT lines, above the top wall. P0/P1 draw
@@ -810,28 +749,17 @@ ScoreRepeatLoop
         cpy #FONT_ROWS
         bne ScoreRowLoop
 
-        ; GRP0/GRP1 first, before anything else: ScoreRowLoop's last write
-        ; to them (the digits' own last font row) is still sitting there,
-        ; still at double width and the score colors, until TopWallLoop's
-        ; loop body below gets around to clearing them. Putting COLUBK
-        ; first (see its comment) fixed one bug but caused another: the
-        ; background now turns white almost immediately, while the stale
-        ; digit pattern is still gold/blue for a few more cycles — a
-        ; leftover smear of score color on the wall, its size tracking
-        ; whatever that digit's last row happened to be (confirmed via a
-        ; real screenshot: a gold leak that grew/shrank with the digit
-        ; shown — exactly GRP0's stale pattern). Clearing GRP0/GRP1 here
-        ; makes them harmless (0 renders nothing) regardless of what
-        ; COLUP0/1 or NUSIZ0/1 still hold for the next few cycles.
+        ; Order matters on this shared line: GRP0/GRP1 cleared first (the
+        ; digits' last font row is still loaded; a stale pattern would
+        ; show in the score colors once COLUBK below turns the
+        ; background white), then COLUBK itself — needs to land inside
+        ; HBLANK (~22-23 cycles from the WSYNC that started this line),
+        ; or a sliver of score-row black bleeds into the wall. NUSIZ0/1
+        ; and COLUP0/1 after aren't time-critical.
         lda #0
         sta GRP0
         sta GRP1
 
-        ; COLUBK next, still well inside HBLANK (~22-23 CPU cycles): with
-        ; NUSIZ0/NUSIZ1/COLUP0/COLUP1 ahead of it too (the original order),
-        ; WallColor's write landed at ~24 cycles in — just past HBLANK —
-        ; so a sliver of this line's visible start still showed the score
-        ; row's black COLUBK before the wall's white took over.
         lda WallColor             ; normally COLOR_WHITE, flashes FLASH_COLOR
         sta COLUBK                ; during STATE_GAMEOVER (see VBLANK)
         lda #NUSIZ0_PLAY         ; normal-width P0, keep the net's width
@@ -965,48 +893,26 @@ SkipBBall
         sta ENABL
         sta ENAM0
 
-        ; Blank immediately, before the collision response below — same
-        ; fix as VBLANK's own timing (TIMER_SETUP/TIMER_WAIT, see header
-        ; note), applied here for the same reason: on a hit, the response
-        ; below runs several extra JSRs (AdvanceHitLevel, GetRallySpeed
-        ; twice, SetBallDYToRallySpeed, StartHitSound) whose combined cost
-        ; (~190 cycles measured by hand) is well over 2 scanlines — far
-        ; more than a single WSYNC can absorb as "the rest of this line".
-        ; An earlier fix added exactly one WSYNC here, which covered the
-        ; no-hit path but not this one: on a hit, that WSYNC silently
-        ; swallowed 2-3 real scanlines before firing, stretching the
-        ; WHOLE frame longer only on hit frames — seen as a brief flash
-        ; right as the ball hit a paddle. TIMER_SETUP reserves the full
-        ; 30-line Overscan budget up front (comfortable margin over the
-        ; ~190-cycle worst case), and TIMER_WAIT's own closing WSYNC
-        ; absorbs however long the response actually took, hit or not.
+        ; Blank immediately, before the collision response below: its
+        ; cost is data-dependent (several extra JSRs on a hit, ~190
+        ; cycles worst case — well over a scanline), so TIMER_SETUP
+        ; reserves the full Overscan budget up front rather than hand-
+        ; counting a single WSYNC's worth of slack (see header note).
         lda #2
         sta VBLANK
         TIMER_SETUP 30
 
         ; --- ball<->paddle collision (hardware) ---
-        ; CXP0FB/CXP1FB accumulate collisions across the whole visible
-        ; frame that just ran; reading now picks up the full result.
-        ; CXCLR at the end clears the latches for next frame (they're
-        ; sticky, they don't clear themselves).
-        ; On a hit, the ball goes to (or stays at) the current rally speed
-        ; (GetRallySpeed/LevelSpeedTable — starts at BALL_RALLY_SPEED, then
-        ; creeps up every HITS_PER_LEVEL hits, see the constants note) — on
-        ; the serve's first hit this "accelerates" the ball once
-        ; (BALL_SERVE_SPEED -> rally speed); later hits just reaffirm the
-        ; current value. BallDY's magnitude is also set to the same rally
-        ; speed, keeping its sign (vertical direction doesn't change on a
-        ; paddle hit) — then gets the paddle's English: if P0/P1Dir shows
-        ; the paddle was moving at the moment of contact, that direction is
-        ; added to BallDY, closing or opening the angle (never reaching 0
-        ; — see the BALL_SPIN constant).
+        ; CXP0FB/CXP1FB accumulate across the frame; read now for the
+        ; full result, CXCLR at the end to drain the sticky latches. On a
+        ; hit: BallDX/BallDY snap to the current rally speed
+        ; (GetRallySpeed), keeping sign, then get the paddle's English
+        ; (P0/P1Dir added to BallDY if it was moving on contact).
         ;
-        ; Only runs while actually PLAYING — a frozen ball (ATTRACT/
-        ; GAMEOVER) sits centered, nowhere near either paddle, so this
-        ; would never fire in practice anyway, but skipping it outright
-        ; keeps "frozen means nothing changes" airtight rather than
-        ; relying on that geometry. CXCLR still runs every frame
-        ; regardless (the latches are sticky and must be drained).
+        ; Gated on STATE_PLAYING: a frozen ball can't reach a paddle
+        ; anyway, but skipping outright keeps "frozen means nothing
+        ; changes" exact rather than relying on geometry. CXCLR still
+        ; runs every frame regardless.
         lda GameState
         cmp #STATE_PLAYING
         beq DoCollisionCheck
@@ -1111,45 +1017,33 @@ PaddleHtTable
         .byte PADDLE_HT, (PADDLE_HT*3)/4, 21
 
 ; ---------------------------------------------------------------------------
-; DigitFont - 10 digits (0-9) x FONT_ROWS(5) bytes, one byte per font row
-; (each drawn SCORE_SCALE scanlines tall on screen — see ScoreRowLoop),
-; top row first. Each byte's pattern is centered in bits 5-2, the same
-; alignment as PADDLE_PATTERN, so the digits sit at the same safe
-; horizontal margin already validated for the paddles at P0_X/P1_X.
-; Derived from standard 7-segment digit shapes (not copied from an
-; unverified reference), so its correctness can be checked by hand:
-; segments a(top)/b(upper-right)/c(lower-right)/d(bottom)/e(lower-left)/
-; f(upper-left)/g(middle) map to rows top,upper,middle,lower,bottom. The
-; middle row is NOT purely "segment g, blank if g is off": on a real
-; 7-segment display b/f and c/e touch at mid-height even when g is unlit,
-; so whichever side stroke(s) rows 1/3 carry must also continue through
-; row 2, or the digit visibly splits into two disconnected halves with a
-; gap in between (found via a real emulator screenshot — 0 and 7, the
-; only two digits with g off, both shipped with row 2 wrongly blank).
+; DigitFont - 10 digits (0-9) x FONT_ROWS(5) bytes, one byte per row (each
+; drawn SCORE_SCALE scanlines tall — see ScoreRowLoop), top row first.
+; Pattern centered in bits 5-2, same alignment as PADDLE_PATTERN, so
+; digits sit at the paddles' validated horizontal margin.
 ;
-; Two more rules, both found the same way (a real screenshot, not just
-; reasoning about the bytes): a bit added to "flag" a stroke (1's nose)
-; MUST share a row with that stroke's own column, not just a neighboring
-; one — two adjacent-but-different columns read as two disconnected
-; offset blocks (a "staircase"), not one shape with a flag on it. And
-; every digit should light SOMETHING in row 0 and row 4, even ones whose
-; real 7-segment shape skips the top/bottom bar (1, 4, 7) — leaving a
-; row fully blank makes that digit visibly shorter than the others at
-; this scale, not just differently shaped.
+; Derived from 7-segment shapes: a(top)/b(upper-right)/c(lower-right)/
+; d(bottom)/e(lower-left)/f(upper-left)/g(middle) map to rows top, upper,
+; middle, lower, bottom. Two rules that aren't obvious from the segment
+; mapping alone:
+; - A row shared between two strokes (e.g. a "flag" added to a digit)
+;   must light the SAME column as the stroke it's attached to — a flag
+;   in a different column renders as a disconnected offset block, not
+;   one shape.
+; - Every digit should light something in row 0 AND row 4, even ones
+;   whose 7-segment shape skips the top/bottom bar (1, 4, 7) — leaving a
+;   row blank makes that digit read as shorter than the rest at this
+;   scale, not just differently shaped.
 ; ---------------------------------------------------------------------------
 DigitFont
         .byte $3C,$24,$24,$24,$3C  ; 0
-        .byte $0C,$04,$04,$04,$04  ; 1 (nose shares row 0 with the stem's
-                                    ; own column, then the stem runs the
-                                    ; full height, same as every digit)
+        .byte $0C,$04,$04,$04,$04  ; 1
         .byte $3C,$04,$3C,$20,$3C  ; 2
         .byte $3C,$04,$3C,$04,$3C  ; 3
-        .byte $24,$24,$3C,$04,$04  ; 4 (top uprights/bottom descender each
-                                    ; stretched one row further, to touch
-                                    ; row 0/row 4 like every other digit)
+        .byte $24,$24,$3C,$04,$04  ; 4
         .byte $3C,$20,$3C,$04,$3C  ; 5
         .byte $3C,$20,$3C,$24,$3C  ; 6
-        .byte $3C,$04,$04,$04,$04  ; 7 (descender stretched to row 4)
+        .byte $3C,$04,$04,$04,$04  ; 7
         .byte $3C,$24,$3C,$24,$3C  ; 8
         .byte $3C,$24,$3C,$04,$3C  ; 9
 
@@ -1290,20 +1184,11 @@ NoRandomTap
         rts
 
 ; ---------------------------------------------------------------------------
-; AdvanceSelectSettings - reads the GAME SELECT console switch (SWCHB bit
-; 1, active low) and, on RELEASE, uses how long it was held to decide
-; between two different settings (see the constants note near
-; SELECT_HOLD_THRESHOLD): a short TAP cycles paddle-size difficulty
-; (unchanged from before — PaddleDifficultyStage/PaddleHtTable, including
-; the bottom-edge re-anchoring), a long HOLD instead toggles AIMode (P1:
-; joystick <-> computer). SelectHoldFrames accumulates while the switch
-; is down (SelectSameState below) and is read once, on the release edge,
-; to classify the press — it does NOT drive anything while still held,
-; so there's no visible feedback until release (the setting actually
-; changing is the feedback). Called once per frame, in any GameState (a
-; player can dial in settings before starting, same as a real toggle
-; switch), before the paddles move, so a change applies the same frame
-; it's detected.
+; AdvanceSelectSettings - reads GAME SELECT (SWCHB bit 1, active low).
+; SelectHoldFrames counts how long it's held; on release, a short tap
+; cycles paddle-size difficulty, a long hold (SELECT_HOLD_THRESHOLD)
+; toggles AIMode instead. No feedback while held — the setting changing
+; on release IS the feedback. Runs every frame, any GameState.
 ; ---------------------------------------------------------------------------
 AdvanceSelectSettings
         lda SWCHB
@@ -1346,17 +1231,13 @@ SelectNoStageWrap
         jsr RecomputePaddleYMax
 
         ; Re-anchor each paddle's BOTTOM edge (not top) across the resize:
-        ; new P0Y = old P0YEnd - new PaddleHt, clamped up to PADDLE_Y_MIN if
-        ; that would go negative. Without this, the TOP stayed put and only
-        ; the bottom shrank, leaving a growing gap below a paddle that used
-        ; to be flush with the wall — reported by the user as "the small
-        ; paddle doesn't reach the bottom".
+        ; new P0Y = old P0YEnd - new PaddleHt, clamped up to PADDLE_Y_MIN.
+        ; Anchoring the top instead leaves a growing gap below a paddle
+        ; that was flush with the wall as it shrinks.
         ;
-        ; The subtraction is safe from underflow given this game's actual
-        ; constants (min P0YEnd = PADDLE_Y_MIN + smallest PaddleHtTable
-        ; entry, comfortably above the largest PaddleHt we'd subtract) —
-        ; if PADDLE_Y_MIN or PaddleHtTable's entries change later, re-check
-        ; that min(P0YEnd) still exceeds max(PaddleHt).
+        ; Safe from underflow given this game's actual constants (min
+        ; P0YEnd exceeds max PaddleHt) — re-check if PADDLE_Y_MIN or
+        ; PaddleHtTable's entries ever change.
         lda P0YEnd
         sec
         sbc PaddleHt
@@ -1385,13 +1266,13 @@ SelectSettingsDone
         rts
 
 ; ---------------------------------------------------------------------------
-; ComputeAIInput - the AI opponent's "virtual joystick" for P1. Tracks the
-; ball's vertical center with a small dead zone (AI_DEADZONE); see the
-; constants note near AI_DEADZONE for the three layers of deliberate
-; imperfection this applies (net-crossing gate, half-speed reaction, the
-; dead zone itself). Writes P1Input in the same bit0=up/bit1=down,
-; active-low format as SWCHA's P1 bits, so the P1 movement code that
-; reads it afterward doesn't need to know this isn't a real joystick.
+; ComputeAIInput - the AI opponent's "virtual joystick" for P1: tracks
+; the ball's vertical center with a dead zone (AI_DEADZONE), only once
+; the ball crosses the net onto P1's side, at 2/3 of PADDLE_SPEED
+; (AISkipCounter) — deliberately imperfect so it stays beatable. Writes
+; P1Input in the same bit0=up/bit1=down, active-low format as SWCHA's P1
+; bits, so the P1 movement code doesn't need to know this isn't a real
+; joystick.
 ; ---------------------------------------------------------------------------
 ComputeAIInput
         lda #%00000011           ; default: both released, no movement
@@ -1401,15 +1282,11 @@ ComputeAIInput
 
         lda BallX
         cmp #NET_X
-        bcc ComputeAIInputDone   ; ball hasn't reached the net yet -> wait
-                                 ; for it to cross onto P1's side instead
-                                 ; of reacting the instant P0 hits it
+        bcc ComputeAIInputDone   ; wait for the ball to cross the net
+                                 ; instead of reacting instantly
 
-        ; Speed: 2 of every 3 reacting frames move, the 3rd is skipped —
-        ; giving 2/3 of PADDLE_SPEED's rate on average. Splits the
-        ; difference between the two extremes already tried and found
-        ; wrong: this gate alone at FULL speed was still too hard, and
-        ; adding a flat HALF-speed stutter on top of it was too easy.
+        ; 2 of every 3 reacting frames move, the 3rd is skipped — 2/3 of
+        ; PADDLE_SPEED's rate on average.
         inc AISkipCounter
         lda AISkipCounter
         cmp #3
@@ -1496,22 +1373,16 @@ RecomputePaddleYMax
         rts
 
 ; ---------------------------------------------------------------------------
-; ResetBall - returns the ball to center screen with a random serve ANGLE
-; AND DIRECTION (from RandomSeed bits), after a point or at Reset. Doesn't
-; touch P0/P1 (paddles stay where they were). Also resets the speed
-; progression (HitLevel/HitsSinceLevelUp) — every new rally starts back at
-; BALL_SERVE_SPEED, not wherever the previous rally's hits had accelerated
-; to. This runs on every point, not just a match win: ResetBall is called
-; from both the regular score path and the match-win path, so a single
-; reset here covers both (no need to duplicate it at each call site).
+; ResetBall - centers the ball with a random serve angle and direction
+; (from RandomSeed), after a point or at Reset. Doesn't touch P0/P1.
+; Also resets HitLevel/HitsSinceLevelUp — every new rally starts back at
+; BALL_SERVE_SPEED, not wherever the last rally had accelerated to.
 ;
-; BallDX/BallDY always have FIXED magnitude (BALL_SERVE_SPEED) on both
-; axes — the angle comes from BallSkipMode (RandomSeed bits 2-3), which
-; makes one axis skip odd frames (see the move block in MainLoop), not
-; from different magnitudes (see the constants note: that changed the
-; total diagonal speed between profiles). Bits 0-1 pick each axis's sign
-; (quadrant) — 3 profiles x 4 quadrants = up to 12 possible serve
-; trajectories.
+; BallDX/BallDY always have fixed magnitude (BALL_SERVE_SPEED); the angle
+; comes from BallSkipMode (RandomSeed bits 2-3, one axis skips odd
+; frames — see MainLoop), not from different magnitudes, which would
+; change the total diagonal speed between profiles. Bits 0-1 pick each
+; axis's sign — 3 profiles x 4 quadrants = up to 12 serve trajectories.
 ; ---------------------------------------------------------------------------
 ResetBall
         lda #0
