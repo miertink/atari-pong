@@ -177,14 +177,15 @@ NUSIZ1_SCORE   = %00000101      ; double-width P1 (score row only; P1 has
                                  ; no missile, so no width bits needed)
 
 ; Center net: a dashed vertical line down the middle of the play area
-; (classic tennis-net look), drawn with the playfield (PF2 bit 0), not a
+; (classic tennis-net look), drawn with the playfield (PF2 bit 7), not a
 ; missile — M0 shared COLUP0 with P0, which stopped working once P0 got
 ; its own paddle color (SCORE_P0_COLOR); the playfield has its own color
 ; (COLUPF), unaffected by either player's. With CTRLPF's reflect bit on
-; (see Reset), PF2's last bit mirrors onto the right half exactly at the
-; screen's center, so a single bit is enough for a centered line.
-; Toggled on/off via bit 1 of the scanline counter — 2 lines on, 2 off —
-; shifted down to bit 0 for PF2 (see MidLoop).
+; (see Reset), the LAST of the playfield's 20 bit-positions mirrors onto
+; the right half right at the screen's center, merging into one line —
+; that last position is PF2 bit 7 (PF2's on-screen bit order is
+; reversed: bit0 first, bit7 last), not bit 0 — see MidLoop.
+; Toggled on/off via bit 1 of the scanline counter.
 NET_X          = 80             ; horizontal center, same column as the ball
 
 P0_X           = 4              ; left paddle's fixed horizontal position
@@ -853,12 +854,19 @@ SkipMP1
 SkipMBall
         sta ENABL
 
-        ; center net: 2 lines on / 2 off — bit 1 of the scanline counter,
-        ; shifted down to bit 0 for PF2 (see NET_X's note). No branch
-        ; needed either way.
+        ; center net: 2 lines on / 2 off — bit 1 of the scanline counter
+        ; mapped to PF2 BIT 7, not bit 0 (PF2's on-screen bit order is
+        ; reversed: bit0 is first, bit7 is last — bit7 is the one
+        ; adjacent to center that the reflect bit merges into one line,
+        ; see NET_X's note; bit0, tried first, left two separate dashed
+        ; lines instead of one). Table lookup instead of a branch: same
+        ; worst-case cost either way, not whichever path MidLoop's
+        ; P0/P1/ball checks happen to also take that line — this loop's
+        ; budget is already tight (see the file's zone-separation note).
         txa
         and #%00000010
-        lsr
+        tax
+        lda NetPF2Table,x
         sta PF2
 
         sta WSYNC
@@ -1034,6 +1042,14 @@ BoostThresholdTable
 ; ---------------------------------------------------------------------------
 PaddleHtTable
         .byte PADDLE_HT, (PADDLE_HT*3)/4, 21
+
+; ---------------------------------------------------------------------------
+; NetPF2Table - MidLoop's center-net toggle, indexed by (X AND %10) — 0 or
+; 2, hence 3 entries with index 1 unused. See the center-net comment in
+; MidLoop for why it's PF2 bit 7 ($80), not bit 0.
+; ---------------------------------------------------------------------------
+NetPF2Table
+        .byte $00,$00,$80
 
 ; ---------------------------------------------------------------------------
 ; DigitFont - 10 digits (0-9) x FONT_ROWS(5) bytes, one byte per row (each
