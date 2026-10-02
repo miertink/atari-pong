@@ -890,6 +890,25 @@ SkipBBall
         sta ENABL
         sta ENAM0
 
+        ; Blank immediately, before the collision response below — same
+        ; fix as VBLANK's own timing (TIMER_SETUP/TIMER_WAIT, see header
+        ; note), applied here for the same reason: on a hit, the response
+        ; below runs several extra JSRs (AdvanceHitLevel, GetRallySpeed
+        ; twice, SetBallDYToRallySpeed, StartHitSound) whose combined cost
+        ; (~190 cycles measured by hand) is well over 2 scanlines — far
+        ; more than a single WSYNC can absorb as "the rest of this line".
+        ; An earlier fix added exactly one WSYNC here, which covered the
+        ; no-hit path but not this one: on a hit, that WSYNC silently
+        ; swallowed 2-3 real scanlines before firing, stretching the
+        ; WHOLE frame longer only on hit frames — seen as a brief flash
+        ; right as the ball hit a paddle. TIMER_SETUP reserves the full
+        ; 30-line Overscan budget up front (comfortable margin over the
+        ; ~190-cycle worst case), and TIMER_WAIT's own closing WSYNC
+        ; absorbs however long the response actually took, hit or not.
+        lda #2
+        sta VBLANK
+        TIMER_SETUP 30
+
         ; --- ball<->paddle collision (hardware) ---
         ; CXP0FB/CXP1FB accumulate collisions across the whole visible
         ; frame that just ran; reading now picks up the full result.
@@ -972,29 +991,8 @@ SkipCollisionResponse
         sta AUDV0
 SoundDone
 
-        ; Cleanly end this line before asserting VBLANK below. Everything
-        ; since BottomWallLoop's last WSYNC (object-clear, the collision
-        ; response — several extra JSRs on a hit, so its cost varies frame
-        ; to frame — and the sound countdown above) has run with no WSYNC
-        ; of its own, sharing whatever's left of the current line same as
-        ; every other zone transition in this kernel. That's fine for a
-        ; register like COLUBK, but VBLANK takes effect immediately,
-        ; mid-scanline, wherever this variable-cost cleanup happened to
-        ; finish — splitting that one line visibly half-lit/half-blanked.
-        ; Seen as a short gap in the bottom wall whose exact column drifts
-        ; frame to frame (reported as a flickering line). This WSYNC
-        ; finishes that line on its own first, so VBLANK always lands at
-        ; the very start of the next one instead.
-        sta WSYNC
-
-        ; --- Overscan: 30 lines total (the WSYNC above is the first) ---
-        lda #2
-        sta VBLANK
-        ldx #29
-OverscanLoop
-        sta WSYNC
-        dex
-        bne OverscanLoop
+        ; --- Overscan: 30 lines, reserved via TIMER_SETUP above ---
+        TIMER_WAIT
 
         jmp MainLoop
 
