@@ -219,10 +219,19 @@ and a randomized serve — all working and validated in Stella.
   Atari 2600 convention. At power-up and after a match ends, the game
   freezes (paddles/ball stop) with the final score held on screen and the
   background flashing during game-over; GAME RESET (re)starts a fresh
-  game immediately, from any state, including mid-rally. Paddle-size
-  difficulty moved from GAME RESET to GAME SELECT to free up RESET for
-  this role.
-- [ ] AI opponent, sound beyond the hit/score beeps.
+  game immediately, from any state, including mid-rally.
+- [x] **AI opponent for P1.** GAME SELECT now does double duty by press
+  duration: a short tap still cycles paddle-size difficulty, a long hold
+  (~0.75s) toggles AIMode. When on, ComputeAIInput synthesizes P1's
+  joystick input instead of reading SWCHA — tracks the ball's vertical
+  center with a small dead zone, only while the ball is heading toward
+  it (BallDX > 0); when the ball's heading back toward P0, the AI holds
+  still instead of preemptively repositioning, the deliberate
+  imperfection that keeps it beatable. Shares the exact P1 movement code
+  the human path uses (same speed, same clamps, same English on
+  contact) — P1Input just carries SWCHA's bit0=up/bit1=down convention
+  regardless of source.
+- [ ] Sound beyond the hit/score beeps.
 
 See `src/main.asm`'s header for the engineering notes worth remembering
 (hardware-timer VBLANK, WSYNC-before-HMOVE, HMCLR truncating fine motion,
@@ -242,7 +251,7 @@ there, not the blow-by-blow.
 
 ## 8. Decisions
 
-Game = Pong; target = NTSC; controls = joystick; modes = 2 players (AI
-opponent later); score to 5; no continuous ball acceleration (a stepped
-ramp — one jump on the first hit, then finer 0.25 steps every 5 hits — is
-the deliberate exception). Nothing open right now.
+Game = Pong; target = NTSC; controls = joystick; modes = 2 players or
+solo vs. AI (GAME SELECT hold toggles it); score to 5; no continuous ball
+acceleration (a stepped ramp — one jump on the first hit, then finer 0.25
+steps every 5 hits — is the deliberate exception). Nothing open right now.

@@ -28,9 +28,15 @@
 ;     (re)starts a fresh game immediately: 0/0 score, a new random serve,
 ;     GameState=STATE_PLAYING. This is true in ANY state, including mid-
 ;     rally — real GAME RESET switches restart the game outright, they
-;     don't ask for confirmation. Paddle-size difficulty, which used to
-;     live on GAME RESET, moved to GAME SELECT (SWCHB bit 1) so the two
-;     don't collide (see AdvancePaddleDifficulty/CheckStartButton).
+;     don't ask for confirmation. GAME SELECT (bit 1) does double duty by
+;     press DURATION rather than needing a second switch: a short tap
+;     cycles paddle-size difficulty, a long hold instead toggles the AI
+;     opponent for P1 — see AdvanceSelectSettings/CheckStartButton.
+;   - AIMode: when on, P1 is computer-controlled (ComputeAIInput) instead
+;     of reading the second joystick — tracks the ball's vertical center
+;     with a dead zone, only while the ball is heading toward it, the
+;     same deliberate imperfection the original game used to stay
+;     beatable. Off by default (2 players).
 ;
 ; Engineering notes worth keeping in mind when touching this code:
 ;
@@ -70,7 +76,7 @@ PADDLE_HT      = 32             ; ORIGINAL (full-size) paddle height, in
                                  ; the runtime value PaddleHt (RAM), which
                                  ; the GAME SELECT switch cycles through
                                  ; PaddleHtTable (see the difficulty note
-                                 ; further down and AdvancePaddleDifficulty).
+                                 ; further down and AdvanceSelectSettings).
 PADDLE_PATTERN = %00111100      ; paddle bit pattern (GRP0/GRP1)
 PADDLE_SPEED   = 3              ; scanlines/frame while holding the joystick
 FONT_ROWS      = 5              ; DigitFont height, in raw font rows
@@ -116,16 +122,29 @@ BALL_RALLY_SPEED = 2
 HITS_PER_LEVEL = 5
 MAX_HIT_LEVEL  = 7              ; LevelSpeedTable has MAX_HIT_LEVEL+1 entries
 
-; Difficulty: the GAME SELECT console switch (SWCHB bit 1, active low —
-; doesn't force a real 6502 reset, it's just another software-readable
-; switch) cycles the paddle height through 3 stages on each press: full
-; size -> 3/4 -> 2/3 -> back to full. PaddleHtTable holds the 3 heights
-; (2/3 of 32 rounds to 21). Detected by edge (comparing this frame's
-; switch state to last frame's in PrevSelectState), so holding the button
-; down doesn't rapid-cycle through stages every frame. GAME RESET (bit 0)
-; is reserved for starting/restarting the game — see CheckStartButton —
-; so the two switches don't step on each other.
+; Difficulty AND the AI opponent share the GAME SELECT console switch
+; (SWCHB bit 1, active low), split by press duration rather than needing
+; a second switch: a short TAP cycles the paddle height through 3 stages
+; (full -> 3/4 -> 2/3 -> back to full, PaddleHtTable); a LONG HOLD
+; (released only after SELECT_HOLD_THRESHOLD frames) instead toggles
+; AIMode (P1: joystick <-> computer-controlled). Both decisions are made
+; on RELEASE, once the hold duration is known (AdvanceSelectSettings
+; tracks it in SelectHoldFrames while the switch is down). GAME RESET
+; (bit 0) is reserved for starting/restarting the game — see
+; CheckStartButton — so the two switches don't step on each other.
 PADDLE_DIFFICULTY_STAGES = 3
+SELECT_HOLD_THRESHOLD    = 45   ; frames (~0.75s @ 60Hz) — long enough that
+                                 ; an ordinary tap never accidentally reads
+                                 ; as a hold, short enough not to feel like
+                                 ; a dead button while waiting for it
+
+; AI opponent (P1): tracks the ball's vertical center with a small dead
+; zone (avoids jittering exactly on alignment) and ONLY while the ball is
+; heading toward it (BallDX > 0) — when the ball's heading back toward
+; P0, the AI paddle holds still instead of preemptively repositioning,
+; the same deliberate imperfection the original game used to stay
+; beatable rather than tracking the ball perfectly at all times.
+AI_DEADZONE = 4                 ; scanlines of slack around dead-on alignment
 
 ; Serve angle: 3 profiles, picked by FREQUENCY (which axis, if any, skips
 ; odd frames) rather than by step magnitude — magnitude-based profiles
@@ -266,9 +285,13 @@ PaddleYMax ds 1                 ; COURT_BOTTOM-PaddleHt, recomputed whenever
                                  ; can use the room a bigger one couldn't
 PaddleDifficultyStage ds 1      ; 0..PADDLE_DIFFICULTY_STAGES-1
 PrevSelectState ds 1            ; last frame's GAME SELECT switch bit, for
-                                 ; edge detection (AdvancePaddleDifficulty)
+                                 ; edge detection (AdvanceSelectSettings)
 PrevResetState ds 1             ; last frame's GAME RESET switch bit, for
                                  ; edge detection (CheckStartButton)
+SelectHoldFrames ds 1           ; counts frames GAME SELECT has been held
+                                 ; down this press; compared against
+                                 ; SELECT_HOLD_THRESHOLD on release to tell
+                                 ; a tap from a hold (AdvanceSelectSettings)
 GameState ds 1                  ; STATE_ATTRACT/PLAYING/GAMEOVER — gates
                                  ; paddle/ball movement and the collision
                                  ; response (see VBLANK); only PLAYING runs
@@ -278,6 +301,18 @@ CourtColor ds 1                  ; this frame's COLUBK for the court zone —
                                  ; both computed once in VBLANK (normally
                                  ; white/black, flashing FLASH_COLOR during
                                  ; STATE_GAMEOVER), just read by the kernel
+AIMode ds 1                     ; 0 = P1 is joystick-controlled (2 players,
+                                 ; the default), 1 = P1 is computer-
+                                 ; controlled — toggled by a GAME SELECT
+                                 ; hold (AdvanceSelectSettings)
+P1Input ds 1                    ; this frame's P1 up/down bits, bit0=up/
+                                 ; bit1=down, active low — same convention
+                                 ; as SWCHA's P1 bits, so the existing P1
+                                 ; movement code doesn't care whether this
+                                 ; came from the real joystick or from
+                                 ; ComputeAIInput's ball tracking
+AIBallCenter ds 1                ; scratch: this frame's ball/paddle
+AIPaddleCenter ds 1               ; vertical centers (ComputeAIInput only)
 
         SEG code
         ORG $F000
@@ -386,7 +421,7 @@ MainLoop
                                  ; LFSR "spinning" independent of gameplay,
                                  ; so it looks random whenever a serve happens
 
-        jsr AdvancePaddleDifficulty  ; before the paddles move, so a size
+        jsr AdvanceSelectSettings  ; before the paddles move, so a size/AI
                                  ; change (if any) takes effect this frame
 
         jsr CheckStartButton     ; GAME RESET: (re)starts the game from ANY
@@ -499,10 +534,23 @@ SkipP0Down
         adc PaddleHt
         sta P0YEnd
 
+        ; --- P1 input source: real joystick (2 players) or AI tracking
+        ; (vs CPU) — P1Input carries the same bit0=up/bit1=down, active-
+        ; low convention as SWCHA's P1 bits either way, so the movement
+        ; code below doesn't need to know or care which one it's reading.
+        lda AIMode
+        beq UseJoystickP1
+        jsr ComputeAIInput
+        jmp P1InputReady
+UseJoystickP1
+        lda SWCHA
+        sta P1Input
+P1InputReady
+
         ; --- move paddle P1 (joystick 1 = right port: bit0=Up, bit1=Down) ---
         lda #0
         sta P1Dir
-        lda SWCHA
+        lda P1Input
         and #%00000001
         bne SkipP1Up
         lda P1Y
@@ -516,7 +564,7 @@ P1UpOk
         lda #-1
         sta P1Dir
 SkipP1Up
-        lda SWCHA
+        lda P1Input
         and #%00000010
         bne SkipP1Down
         lda P1Y
@@ -1028,8 +1076,8 @@ BoostThresholdTable
 
 ; ---------------------------------------------------------------------------
 ; PaddleHtTable - paddle height at each PaddleDifficultyStage (0..
-; PADDLE_DIFFICULTY_STAGES-1), cycled by the GAME RESET switch (see
-; AdvancePaddleDifficulty): full PADDLE_HT(32), then 3/4 (24, exact),
+; PADDLE_DIFFICULTY_STAGES-1), cycled by a GAME SELECT tap (see
+; AdvanceSelectSettings): full PADDLE_HT(32), then 3/4 (24, exact),
 ; then 2/3 (32*2/3 = 21.33, rounded to 21).
 ; ---------------------------------------------------------------------------
 PaddleHtTable
@@ -1215,32 +1263,56 @@ NoRandomTap
         rts
 
 ; ---------------------------------------------------------------------------
-; AdvancePaddleDifficulty - reads the GAME SELECT console switch (SWCHB bit
-; 1, active low) and, on a fresh press (edge from released to pressed, not
-; just "currently pressed" — otherwise holding it down would cycle through
-; stages every single frame), advances PaddleDifficultyStage and looks up
-; the new PaddleHt from PaddleHtTable. Called once per frame, in any
-; GameState (a player can dial in difficulty before starting, same as a
-; real toggle switch), before the paddles move, so a change applies the
-; same frame it's detected.
+; AdvanceSelectSettings - reads the GAME SELECT console switch (SWCHB bit
+; 1, active low) and, on RELEASE, uses how long it was held to decide
+; between two different settings (see the constants note near
+; SELECT_HOLD_THRESHOLD): a short TAP cycles paddle-size difficulty
+; (unchanged from before — PaddleDifficultyStage/PaddleHtTable, including
+; the bottom-edge re-anchoring), a long HOLD instead toggles AIMode (P1:
+; joystick <-> computer). SelectHoldFrames accumulates while the switch
+; is down (SelectSameState below) and is read once, on the release edge,
+; to classify the press — it does NOT drive anything while still held,
+; so there's no visible feedback until release (the setting actually
+; changing is the feedback). Called once per frame, in any GameState (a
+; player can dial in settings before starting, same as a real toggle
+; switch), before the paddles move, so a change applies the same frame
+; it's detected.
 ; ---------------------------------------------------------------------------
-AdvancePaddleDifficulty
+AdvanceSelectSettings
         lda SWCHB
         and #%00000010           ; isolate the GAME SELECT bit (0 = pressed)
         tax
         cpx PrevSelectState
-        beq NoSelectEdge         ; unchanged since last frame, nothing to do
+        beq SelectSameState      ; unchanged since last frame
         stx PrevSelectState
         cpx #0
-        bne NoSelectEdge         ; new state is non-zero (released) — a
-                                 ; release edge, not a press; ignore it
+        bne SelectReleased       ; new state is non-zero (released) — a
+                                 ; release edge; classify the press below
+        ; fresh press: start counting how long it's held
+        lda #0
+        sta SelectHoldFrames
+        jmp SelectSettingsDone
+SelectSameState
+        lda PrevSelectState
+        bne SelectSettingsDone   ; currently released, nothing to accumulate
+        lda SelectHoldFrames
+        cmp #255                 ; clamp — a very long hold must not wrap
+        beq SelectSettingsDone   ; the counter back toward "short tap"
+        inc SelectHoldFrames
+        jmp SelectSettingsDone
+SelectReleased
+        lda SelectHoldFrames
+        cmp #SELECT_HOLD_THRESHOLD
+        bcs SelectLongPress      ; held long enough -> toggle AI
+
+        ; --- short tap: cycle paddle-size difficulty ---
         inc PaddleDifficultyStage
         lda PaddleDifficultyStage
         cmp #PADDLE_DIFFICULTY_STAGES
-        bne NoStageWrap
+        bne SelectNoStageWrap
         lda #0
         sta PaddleDifficultyStage
-NoStageWrap
+SelectNoStageWrap
         ldx PaddleDifficultyStage
         lda PaddleHtTable,x
         sta PaddleHt
@@ -1275,13 +1347,66 @@ P0ReanchorOk
         lda #PADDLE_Y_MIN
 P1ReanchorOk
         sta P1Y
-NoSelectEdge
+        jmp SelectSettingsDone
+
+SelectLongPress
+        ; --- long hold: toggle the AI opponent for P1 ---
+        lda AIMode
+        eor #1
+        sta AIMode
+SelectSettingsDone
+        rts
+
+; ---------------------------------------------------------------------------
+; ComputeAIInput - the AI opponent's "virtual joystick" for P1. Tracks the
+; ball's vertical center with a small dead zone (AI_DEADZONE), and only
+; while the ball is heading toward P1 (BallDX > 0) — see the constants
+; note near AI_DEADZONE for why. Writes P1Input in the same bit0=up/
+; bit1=down, active-low format as SWCHA's P1 bits, so the P1 movement
+; code that reads it afterward doesn't need to know this isn't a real
+; joystick.
+; ---------------------------------------------------------------------------
+ComputeAIInput
+        lda #%00000011           ; default: both released, no movement
+        sta P1Input
+        lda BallDX
+        bmi ComputeAIInputDone   ; ball heading toward P0 -> don't chase
+
+        lda BallY
+        clc
+        adc #(BALL_HT/2)         ; ball's vertical center
+        sta AIBallCenter
+
+        lda PaddleHt
+        lsr                      ; PaddleHt/2
+        clc
+        adc P1Y                  ; + P1Y = P1's vertical center
+        sta AIPaddleCenter
+
+        clc
+        adc #AI_DEADZONE         ; A = paddleCenter + AI_DEADZONE
+        cmp AIBallCenter
+        bcs ComputeAINotAbove    ; paddleCenter+DEADZONE >= ballCenter ->
+                                 ; paddle isn't clearly above the ball
+        lda #%00000001           ; ball is further down -> move down
+        sta P1Input
+        jmp ComputeAIInputDone
+ComputeAINotAbove
+        lda AIPaddleCenter
+        sec
+        sbc #AI_DEADZONE         ; A = paddleCenter - AI_DEADZONE
+        cmp AIBallCenter
+        bcc ComputeAIInputDone   ; paddleCenter-DEADZONE < ballCenter ->
+                                 ; within the dead zone, hold still
+        lda #%00000010           ; ball is further up -> move up
+        sta P1Input
+ComputeAIInputDone
         rts
 
 ; ---------------------------------------------------------------------------
 ; CheckStartButton - reads the GAME RESET console switch (SWCHB bit 0,
 ; active low) and, on a fresh press (same edge-detection pattern as
-; AdvancePaddleDifficulty), immediately (re)starts a fresh game: both
+; AdvanceSelectSettings), immediately (re)starts a fresh game: both
 ; scores to 0, a new random serve (ResetBall), GameState=STATE_PLAYING.
 ; This runs in ANY GameState, including mid-rally — matches real Atari
 ; 2600 hardware, where GAME RESET restarts the game outright whenever
@@ -1312,7 +1437,7 @@ NoStartEdge
 ; RecomputePaddleYMax - sets PaddleYMax = COURT_BOTTOM - PaddleHt: the
 ; highest P0Y/P1Y that keeps the CURRENT-size paddle's bottom edge from
 ; overlapping the bottom wall. Called once at Reset and again whenever
-; PaddleHt changes (AdvancePaddleDifficulty), not every frame — it doesn't
+; PaddleHt changes (AdvanceSelectSettings), not every frame — it doesn't
 ; change on its own between those events.
 ; ---------------------------------------------------------------------------
 RecomputePaddleYMax
